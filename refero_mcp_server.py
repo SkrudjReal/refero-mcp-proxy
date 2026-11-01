@@ -227,25 +227,14 @@ def refero_get_style(style_id: Optional[str] = None, style_ids: Optional[List[st
         if isinstance(html, str):
             for p in re.finditer(r'self\.__next_f\.push\(\[1,\"(.*?)\"\]\)', html):
                 raw = p.group(1).encode("utf-8").decode("unicode_escape", errors="ignore")
-                m = re.search(r'\"result\":(\{.*)', raw)
+                m = re.search(r'\"result\":(\{)', raw)
                 if m:
-                    sub = m.group(1)
-                    depth = 0
-                    end_idx = 0
-                    for i, char in enumerate(sub):
-                        if char == '{':
-                            depth += 1
-                        elif char == '}':
-                            depth -= 1
-                            if depth == 0:
-                                end_idx = i + 1
-                                break
-                    if end_idx > 0:
-                        try:
-                            parsed_result = json.loads(sub[:end_idx])
-                            break
-                        except Exception:
-                            pass
+                    start_idx = m.start(1)
+                    try:
+                        parsed_result, _ = json.JSONDecoder().raw_decode(raw[start_idx:])
+                        break
+                    except Exception:
+                        pass
 
         meta = STYLE_CACHE.get(target_uuid, {"id": target_uuid})
         if parsed_result:
@@ -281,9 +270,10 @@ def refero_get_style(style_id: Optional[str] = None, style_ids: Optional[List[st
                 "design_spec": design_md
             })
         else:
-            header = f"# DESIGN SPEC: {meta.get('siteName', target_uuid)}\n"
-            header += f"> Source: {meta.get('url', f'{REFERO_STYLES_BASE}/style/{target_uuid}')}\n\n"
-            results.append(design_md if design_md else header + "Specification not parsed or style not found.")
+            if design_md:
+                results.append(design_md)
+            else:
+                results.append(f"# ERROR: Specification not found for style {target_uuid}\n> Source: {REFERO_STYLES_BASE}/style/{target_uuid}")
 
     if len(results) == 1:
         return results[0]
@@ -507,31 +497,43 @@ def refero_download_screen(
             except Exception as e:
                 failed.append({"screen_id": sid, "slice_index": idx, "error": str(e), "source_url": url})
 
-        # Vertical stitching if requested and multiple slices exist
-        if stitch and len(urls_to_download) > 1:
-            try:
-                from PIL import Image
-                slice_paths = [dest_dir / f"screen_{sid}_{i}.jpg" for i in range(len(urls_to_download))]
-                imgs = [Image.open(p) for p in slice_paths if p.exists()]
-                if imgs:
-                    max_w = max(im.width for im in imgs)
-                    tot_h = sum(im.height for im in imgs)
-                    stitched = Image.new("RGB", (max_w, tot_h))
-                    y_offset = 0
-                    for im in imgs:
-                        stitched.paste(im, (0, y_offset))
-                        y_offset += im.height
-                    stitch_path = dest_dir / f"screen_{sid}_stitched.jpg"
-                    stitched.save(stitch_path, quality=95)
-                    downloaded.append({
-                        "screen_id": sid,
-                        "type": "stitched_image",
-                        "saved_to": str(stitch_path.resolve()),
-                        "file_size_bytes": stitch_path.stat().st_size,
-                        "file_size_kb": round(stitch_path.stat().st_size / 1024, 2)
-                    })
-            except ImportError:
+        # Vertical stitching if requested
+        if stitch:
+            if len(urls_to_download) <= 1:
                 pass
+            else:
+                try:
+                    from PIL import Image
+                    slice_paths = [dest_dir / f"screen_{sid}_{i}.jpg" for i in range(len(urls_to_download))]
+                    missing = [p for p in slice_paths if not p.exists()]
+                    if missing:
+                        failed.append({
+                            "screen_id": sid,
+                            "error": f"Stitching aborted: {len(missing)} of {len(slice_paths)} slices missing from disk"
+                        })
+                    else:
+                        imgs = [Image.open(p) for p in slice_paths]
+                        max_w = max(im.width for im in imgs)
+                        tot_h = sum(im.height for im in imgs)
+                        stitched = Image.new("RGB", (max_w, tot_h))
+                        y_offset = 0
+                        for im in imgs:
+                            stitched.paste(im, (0, y_offset))
+                            y_offset += im.height
+                        stitch_path = dest_dir / f"screen_{sid}_stitched.jpg"
+                        stitched.save(stitch_path, quality=95)
+                        downloaded.append({
+                            "screen_id": sid,
+                            "type": "stitched_image",
+                            "saved_to": str(stitch_path.resolve()),
+                            "file_size_bytes": stitch_path.stat().st_size,
+                            "file_size_kb": round(stitch_path.stat().st_size / 1024, 2)
+                        })
+                except ImportError:
+                    failed.append({
+                        "screen_id": sid,
+                        "error": "Vertical stitching requires Pillow. Install via: pip install Pillow"
+                    })
 
     return {
         "status": "completed",

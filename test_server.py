@@ -38,7 +38,8 @@ def run_tests():
         if res.get("styles"):
             sid = res["styles"][0]["id"]
             res_style = s.refero_get_style(style_id=sid, response_format="md")
-            check("refero_get_style", "DESIGN SPEC" in str(res_style), f"Style {sid}")
+            has_spec = ("## North Star" in str(res_style) or "## Overview" in str(res_style)) and not str(res_style).startswith("# ERROR:")
+            check("refero_get_style", has_spec, f"Style {sid} verified with valid parsed sections")
         else:
             check("refero_get_style", False, "No styles to test")
     except Exception as e:
