@@ -121,6 +121,9 @@ refero_download_screen(screen_ids=["184751", "184752", "184753"])
 
 # Download all vertical slices of a long scrollable screen
 refero_download_screen(screen_id="184751", all_slices=True)
+
+# Download all slices AND stitch vertically into a single image (requires Pillow)
+refero_download_screen(screen_id="184751", stitch=True)
 ```
 
 ---
@@ -160,7 +163,7 @@ claude mcp add refero python /path/to/refero_mcp_server.py
 
 ## Testing
 
-Run the included standalone test suite:
+Run the included standalone test suite (enforces strict per-test assertion checks and exits with code 1 on any failure):
 ```bash
 python test_server.py
 ```
@@ -169,22 +172,24 @@ Output:
 ```text
 Testing refero-mcp-proxy v2.2.0...
 Total tools registered: 14
-1. refero_search_styles: OK
-3. refero_search_screens: OK
-   Enriched image links in search: OK
-4. refero_get_screen: OK
-5. refero_get_similar_screens: OK
-6. refero_get_screen_image: OK
-7. refero_get_image_instructions: OK
-8. refero_download_screen: OK
-9. refero_get_screen_content: OK
-10. refero_search_flows: OK
-11. refero_get_flow: OK
-12. refero_search_site: OK
-13. refero_search_app: OK
-14. refero_get_catalog: OK
+  [PASS] refero_search_styles: 2 styles found
+  [PASS] refero_get_style: Style a73148b9-449b-42cd-9f38-86ef694f500e
+  [PASS] refero_search_screens: 9 screens retrieved with direct image links
+  [PASS] refero_get_screen: Verified screen ID 184751
+  [PASS] refero_get_similar_screens: 2 similar screens found
+  [PASS] refero_get_screen_image: Full resolution CDN URL and browser guide present
+  [PASS] refero_get_image_instructions: Complete CDN and console bypass snippets ready
+  [PASS] refero_download_screen: Downloaded 412.97 KB
+  [PASS] refero_get_screen_content: Extracted palette with 5 colors
+  [PASS] refero_search_flows: 9 flows discovered
+  [PASS] refero_get_flow: Flow 772 with 7 steps
+  [PASS] refero_search_site: 1 sites matched
+  [PASS] refero_search_app: 12 iOS apps matched
+  [PASS] refero_get_catalog: 2 total catalog entries
 
-All 14 tools verified successfully!
+==================================================
+Results: 14/14 passed
+ALL TESTS PASSED SUCCESSFULLY.
 ```
 
 ---

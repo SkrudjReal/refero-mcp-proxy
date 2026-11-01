@@ -219,31 +219,71 @@ def refero_get_style(style_id: Optional[str] = None, style_ids: Optional[List[st
                     target_uuid = cuid
                     break
 
-        url = f"{REFERO_STYLES_BASE}/{target_uuid}"
+        url = f"{REFERO_STYLES_BASE}/style/{target_uuid}"
         html = http_get(url)
         design_md = ""
+        parsed_result = None
 
-        for p in re.finditer(r'self\.__next_f\.push\(\[1,\"(.*?)\"\]\)', html):
-            raw = p.group(1).encode("utf-8").decode("unicode_escape", errors="ignore")
-            if "# " in raw and ("Color" in raw or "Typography" in raw or "Philosophy" in raw):
-                m = re.search(r'(# [^\"]+)', raw)
+        if isinstance(html, str):
+            for p in re.finditer(r'self\.__next_f\.push\(\[1,\"(.*?)\"\]\)', html):
+                raw = p.group(1).encode("utf-8").decode("unicode_escape", errors="ignore")
+                m = re.search(r'\"result\":(\{.*)', raw)
                 if m:
-                    cand = m.group(1).replace("\\n", "\n").replace('\\"', '"')
-                    if len(cand) > len(design_md):
-                        design_md = cand
+                    sub = m.group(1)
+                    depth = 0
+                    end_idx = 0
+                    for i, char in enumerate(sub):
+                        if char == '{':
+                            depth += 1
+                        elif char == '}':
+                            depth -= 1
+                            if depth == 0:
+                                end_idx = i + 1
+                                break
+                    if end_idx > 0:
+                        try:
+                            parsed_result = json.loads(sub[:end_idx])
+                            break
+                        except Exception:
+                            pass
 
         meta = STYLE_CACHE.get(target_uuid, {"id": target_uuid})
+        if parsed_result:
+            ds = parsed_result.get("designSystem", {})
+            r_meta = parsed_result.get("meta", {})
+            name = r_meta.get("siteName") or meta.get("siteName", target_uuid)
+            source_url = r_meta.get("url") or meta.get("url", f"{REFERO_STYLES_BASE}/style/{target_uuid}")
+
+            md = f"# DESIGN SPEC: {name}\n"
+            md += f"> Source: {source_url}\n\n"
+            if ds.get("northStar"):
+                md += f"## North Star\n{ds['northStar']}\n\n"
+            if ds.get("description"):
+                md += f"## Overview\n{ds['description']}\n\n"
+            if ds.get("elevationPhilosophy"):
+                md += f"## Elevation & Surfaces\n{ds['elevationPhilosophy']}\n\n"
+            if ds.get("dos"):
+                md += "## Do's\n" + "\n".join(f"- {d}" for d in ds['dos']) + "\n\n"
+            if ds.get("donts"):
+                md += "## Don'ts\n" + "\n".join(f"- {d}" for d in ds['donts']) + "\n\n"
+            if ds.get("colors"):
+                md += f"## Color System\n```json\n{json.dumps(ds['colors'], indent=2)}\n```\n\n"
+            if ds.get("typography"):
+                md += f"## Typography\n```json\n{json.dumps(ds['typography'], indent=2)}\n```\n\n"
+            design_md = md
+
         if response_format == "json":
             results.append({
                 "style_id": target_uuid,
                 "meta": meta,
+                "parsed_result": parsed_result,
                 "design_spec_length": len(design_md),
                 "design_spec": design_md
             })
         else:
             header = f"# DESIGN SPEC: {meta.get('siteName', target_uuid)}\n"
-            header += f"> Source: {meta.get('url', f'{REFERO_STYLES_BASE}/{target_uuid}')}\n\n"
-            results.append(header + design_md if design_md else header + "Specification not parsed.")
+            header += f"> Source: {meta.get('url', f'{REFERO_STYLES_BASE}/style/{target_uuid}')}\n\n"
+            results.append(design_md if design_md else header + "Specification not parsed or style not found.")
 
     if len(results) == 1:
         return results[0]
@@ -313,12 +353,17 @@ def refero_get_screen(screen_id: Optional[Union[str, int]] = None, screen_ids: O
             results.append(SCREEN_CACHE_BY_ID[sid])
             continue
 
-        # Fallback search query
+        # Fallback search query - strictly verify ID or UUID matches
         encoded_id = urllib.parse.quote(str(sid))
-        data_s = http_get(f"{REFERO_API_BASE}/v1/search?query={encoded_id}&page=1&per_page=1", is_json=True)
+        data_s = http_get(f"{REFERO_API_BASE}/v1/search?query={encoded_id}&page=1&per_page=10", is_json=True)
         recs = data_s.get("records", []) if isinstance(data_s, dict) else []
-        if recs:
-            results.append(enrich_screen_record(recs[0]))
+        matched = None
+        for r in recs:
+            if str(r.get("id")) == str(sid) or str(r.get("uuid")) == str(sid):
+                matched = r
+                break
+        if matched:
+            results.append(enrich_screen_record(matched))
         else:
             results.append({"error": "Screen not found", "screen_id": sid})
 
@@ -406,11 +451,12 @@ def refero_download_screen(
     screen_id: Optional[Union[str, int]] = None,
     screen_ids: Optional[List[Union[str, int]]] = None,
     output_dir: Optional[str] = None,
-    all_slices: bool = False
+    all_slices: bool = False,
+    stitch: bool = False
 ) -> Dict[str, Any]:
     """
     Download full-resolution screenshot image(s) directly to local disk.
-    Supports single screen_id, multiple screen_ids, and downloading all vertical slices for long pages.
+    Supports single screen_id, multiple screen_ids, downloading all vertical slices, and optional vertical stitching.
     """
     targets = []
     if screen_ids:
@@ -443,7 +489,7 @@ def refero_download_screen(
             failed.append({"screen_id": sid, "error": "No image URLs found"})
             continue
 
-        urls_to_download = slices if all_slices else [slices[0]]
+        urls_to_download = slices if (all_slices or stitch) else [slices[0]]
         for idx, url in enumerate(urls_to_download):
             suffix = f"_{idx}" if len(urls_to_download) > 1 else ""
             filename = f"screen_{sid}{suffix}.jpg"
@@ -460,6 +506,32 @@ def refero_download_screen(
                 })
             except Exception as e:
                 failed.append({"screen_id": sid, "slice_index": idx, "error": str(e), "source_url": url})
+
+        # Vertical stitching if requested and multiple slices exist
+        if stitch and len(urls_to_download) > 1:
+            try:
+                from PIL import Image
+                slice_paths = [dest_dir / f"screen_{sid}_{i}.jpg" for i in range(len(urls_to_download))]
+                imgs = [Image.open(p) for p in slice_paths if p.exists()]
+                if imgs:
+                    max_w = max(im.width for im in imgs)
+                    tot_h = sum(im.height for im in imgs)
+                    stitched = Image.new("RGB", (max_w, tot_h))
+                    y_offset = 0
+                    for im in imgs:
+                        stitched.paste(im, (0, y_offset))
+                        y_offset += im.height
+                    stitch_path = dest_dir / f"screen_{sid}_stitched.jpg"
+                    stitched.save(stitch_path, quality=95)
+                    downloaded.append({
+                        "screen_id": sid,
+                        "type": "stitched_image",
+                        "saved_to": str(stitch_path.resolve()),
+                        "file_size_bytes": stitch_path.stat().st_size,
+                        "file_size_kb": round(stitch_path.stat().st_size / 1024, 2)
+                    })
+            except ImportError:
+                pass
 
     return {
         "status": "completed",
@@ -725,14 +797,15 @@ TOOLS = [
     },
     {
         "name": "refero_download_screen",
-        "description": "Download full-resolution screenshot JPG(s) directly to local disk. Supports single ID, batch list of IDs, and downloading all vertical slices for long pages.",
+        "description": "Download full-resolution screenshot JPG(s) directly to local disk. Supports single ID, batch list of IDs, downloading all vertical slices, and optional vertical stitching.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "screen_id": {"type": ["string", "integer"], "description": "Screen numeric ID or UUID to download."},
                 "screen_ids": {"type": "array", "items": {"type": ["string", "integer"]}, "description": "List of screen IDs to batch download."},
                 "output_dir": {"type": "string", "description": "Target folder on disk (default: ./screenshots)."},
-                "all_slices": {"type": "boolean", "description": "If true, downloads all vertical image slices for long scrollable pages."}
+                "all_slices": {"type": "boolean", "description": "If true, downloads all vertical image slices for long scrollable pages."},
+                "stitch": {"type": "boolean", "description": "If true and multiple slices exist, stitches them vertically into a single image."}
             }
         }
     },
@@ -748,7 +821,7 @@ TOOLS = [
     },
     {
         "name": "refero_get_screen_content",
-        "description": "Analyze screen layout structure, typography, color palette, design patterns, and UI elements.",
+        "description": "Extract structured design metadata (palette colors, typography names, detected design patterns, and page elements) from Refero intelligence.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -847,7 +920,8 @@ def handle_call(name: str, args: Dict[str, Any]) -> Any:
             screen_id=args.get("screen_id"),
             screen_ids=args.get("screen_ids"),
             output_dir=args.get("output_dir"),
-            all_slices=args.get("all_slices", False)
+            all_slices=args.get("all_slices", False),
+            stitch=args.get("stitch", False)
         )
     elif name == "refero_get_image_instructions":
         return refero_get_image_instructions(args.get("topic", "all"))

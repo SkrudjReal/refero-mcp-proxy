@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Test suite for refero_mcp_server.py
-Validates all 14 tools and ensures no exceptions occur.
+Validates all 14 tools and enforces strict pass/fail status with exit codes.
 """
 
 import sys
@@ -14,78 +14,154 @@ import refero_mcp_server as s
 def run_tests():
     print(f"Testing {s.SERVER_NAME} v{s.SERVER_VERSION}...")
     print(f"Total tools registered: {len(s.TOOLS)}")
+    
+    passed = []
+    failed = []
+
+    def check(name: str, condition: bool, detail: str = ""):
+        if condition:
+            passed.append(name)
+            print(f"  [PASS] {name}{f': {detail}' if detail else ''}")
+        else:
+            failed.append(name)
+            print(f"  [FAIL] {name}{f': {detail}' if detail else ''}")
 
     # 1. Styles search
-    res = s.refero_search_styles("minimal", limit=2)
-    print("1. refero_search_styles:", "OK" if "styles" in res else "FAIL")
+    try:
+        res = s.refero_search_styles("apple", limit=2)
+        check("refero_search_styles", "styles" in res and len(res["styles"]) > 0, f"{res.get('count', 0)} styles found")
+    except Exception as e:
+        check("refero_search_styles", False, str(e))
 
     # 2. Get style
-    if res.get("styles"):
-        sid = res["styles"][0]["id"]
-        res_style = s.refero_get_style(style_id=sid, response_format="md")
-        print("2. refero_get_style:", "OK" if "DESIGN SPEC" in res_style else "FAIL")
+    try:
+        if res.get("styles"):
+            sid = res["styles"][0]["id"]
+            res_style = s.refero_get_style(style_id=sid, response_format="md")
+            check("refero_get_style", "DESIGN SPEC" in str(res_style), f"Style {sid}")
+        else:
+            check("refero_get_style", False, "No styles to test")
+    except Exception as e:
+        check("refero_get_style", False, str(e))
 
     # 3. Search screens
-    res_screens = s.refero_search_screens("pricing", per_page=2)
-    print("3. refero_search_screens:", "OK" if "records" in res_screens and len(res_screens["records"]) > 0 else "FAIL")
-    first_screen = res_screens["records"][0]
-    has_embed = "markdown_embed" in first_screen and "direct_image_url" in first_screen
-    print("   Enriched image links in search:", "OK" if has_embed else "FAIL")
-    screen_id = first_screen["id"]
+    screen_id = None
+    try:
+        res_screens = s.refero_search_screens("pricing", per_page=2)
+        has_records = "records" in res_screens and len(res_screens["records"]) > 0
+        has_embed = has_records and "markdown_embed" in res_screens["records"][0] and "direct_image_url" in res_screens["records"][0]
+        check("refero_search_screens", has_records and has_embed, f"{len(res_screens.get('records', []))} screens retrieved with direct image links")
+        if has_records:
+            screen_id = res_screens["records"][0]["id"]
+    except Exception as e:
+        check("refero_search_screens", False, str(e))
 
     # 4. Get screen
-    res_scr = s.refero_get_screen(screen_id=screen_id)
-    print("4. refero_get_screen:", "OK" if res_scr.get("id") == screen_id else "FAIL")
+    try:
+        res_scr = s.refero_get_screen(screen_id=screen_id)
+        is_match = isinstance(res_scr, dict) and res_scr.get("id") == screen_id
+        check("refero_get_screen", is_match, f"Verified screen ID {screen_id}")
+    except Exception as e:
+        check("refero_get_screen", False, str(e))
 
     # 5. Get similar
-    res_sim = s.refero_get_similar_screens(screen_id=screen_id, limit=2)
-    print("5. refero_get_similar_screens:", "OK" if "records" in res_sim else "FAIL")
+    try:
+        res_sim = s.refero_get_similar_screens(screen_id=screen_id, limit=2)
+        check("refero_get_similar_screens", "records" in res_sim, f"{len(res_sim.get('records', []))} similar screens found")
+    except Exception as e:
+        check("refero_get_similar_screens", False, str(e))
 
     # 6. Get screen image & instructions
-    res_img = s.refero_get_screen_image(screen_id=screen_id)
-    print("6. refero_get_screen_image:", "OK" if "full_resolution_url" in res_img and "instructions_how_to_get_in_browser" in res_img else "FAIL")
+    try:
+        res_img = s.refero_get_screen_image(screen_id=screen_id)
+        has_full = "full_resolution_url" in res_img and "instructions_how_to_get_in_browser" in res_img
+        check("refero_get_screen_image", has_full, "Full resolution CDN URL and browser guide present")
+    except Exception as e:
+        check("refero_get_screen_image", False, str(e))
 
     # 7. Image instructions tool
-    res_inst = s.refero_get_image_instructions()
-    print("7. refero_get_image_instructions:", "OK" if "direct_cdn_architecture" in res_inst else "FAIL")
+    try:
+        res_inst = s.refero_get_image_instructions()
+        has_inst = "direct_cdn_architecture" in res_inst and "browser_paywall_bypass_method" in res_inst
+        check("refero_get_image_instructions", has_inst, "Complete CDN and console bypass snippets ready")
+    except Exception as e:
+        check("refero_get_image_instructions", False, str(e))
 
     # 8. Download screen test
-    test_out = Path("test_download")
-    res_dl = s.refero_download_screen(screen_id=screen_id, output_dir=str(test_out))
-    print("8. refero_download_screen:", "OK" if res_dl.get("total_downloaded") == 1 else "FAIL")
-    # Clean up test download
-    if test_out.exists():
-        for f in test_out.glob("*"):
-            f.unlink()
-        test_out.rmdir()
+    try:
+        test_out = Path("test_download")
+        res_dl = s.refero_download_screen(screen_id=screen_id, output_dir=str(test_out))
+        dl_ok = res_dl.get("total_downloaded") == 1
+        check("refero_download_screen", dl_ok, f"Downloaded {res_dl.get('files', [{}])[0].get('file_size_kb', 0)} KB")
+        if test_out.exists():
+            for f in test_out.glob("*"):
+                f.unlink()
+            test_out.rmdir()
+    except Exception as e:
+        check("refero_download_screen", False, str(e))
 
     # 9. Get screen content
-    res_cnt = s.refero_get_screen_content(screen_id=screen_id)
-    print("9. refero_get_screen_content:", "OK" if "dimensions" in res_cnt else "FAIL")
+    try:
+        res_cnt = s.refero_get_screen_content(screen_id=screen_id)
+        has_cnt = "dimensions" in res_cnt and "colors_palette_rgb" in res_cnt
+        check("refero_get_screen_content", has_cnt, f"Extracted palette with {len(res_cnt.get('colors_palette_rgb', []))} colors")
+    except Exception as e:
+        check("refero_get_screen_content", False, str(e))
 
     # 10. Search flows
-    res_flows = s.refero_search_flows("onboarding")
-    print("10. refero_search_flows:", "OK" if "records" in res_flows else "FAIL")
+    flow_id = None
+    try:
+        res_flows = s.refero_search_flows("onboarding")
+        has_fl = "records" in res_flows and len(res_flows["records"]) > 0
+        check("refero_search_flows", has_fl, f"{len(res_flows.get('records', []))} flows discovered")
+        if has_fl:
+            flow_id = res_flows["records"][0]["id"]
+    except Exception as e:
+        check("refero_search_flows", False, str(e))
 
     # 11. Get flow
-    if res_flows.get("records"):
-        fid = res_flows["records"][0]["id"]
-        res_fl = s.refero_get_flow(flow_id=fid)
-        print("11. refero_get_flow:", "OK" if "screenshots" in res_fl else "FAIL")
+    try:
+        if flow_id:
+            res_fl = s.refero_get_flow(flow_id=flow_id)
+            has_steps = "screenshots" in res_fl and len(res_fl.get("screenshots", [])) > 0
+            check("refero_get_flow", has_steps, f"Flow {flow_id} with {len(res_fl.get('screenshots', []))} steps")
+        else:
+            check("refero_get_flow", False, "No flow ID available")
+    except Exception as e:
+        check("refero_get_flow", False, str(e))
 
     # 12. Search site
-    res_site = s.refero_search_site("linear", per_page=2)
-    print("12. refero_search_site:", "OK" if "records" in res_site else "FAIL")
+    try:
+        res_site = s.refero_search_site("linear", per_page=2)
+        has_site = "records" in res_site and len(res_site["records"]) > 0
+        check("refero_search_site", has_site, f"{res_site.get('total_count', 0)} sites matched")
+    except Exception as e:
+        check("refero_search_site", False, str(e))
 
     # 13. Search app
-    res_app = s.refero_search_app("revolut", per_page=2)
-    print("13. refero_search_app:", "OK" if "records" in res_app else "FAIL")
+    try:
+        res_app = s.refero_search_app("revolut", per_page=2)
+        has_app = "records" in res_app and len(res_app["records"]) > 0
+        check("refero_search_app", has_app, f"{len(res_app.get('records', []))} iOS apps matched")
+    except Exception as e:
+        check("refero_search_app", False, str(e))
 
     # 14. Static catalog
-    res_cat = s.refero_get_catalog("sites", search="stripe", limit=2)
-    print("14. refero_get_catalog:", "OK" if "results" in res_cat else "FAIL")
+    try:
+        res_cat = s.refero_get_catalog("sites", search="stripe", limit=2)
+        has_cat = "results" in res_cat and len(res_cat["results"]) > 0
+        check("refero_get_catalog", has_cat, f"{res_cat.get('total_in_catalog', 0)} total catalog entries")
+    except Exception as e:
+        check("refero_get_catalog", False, str(e))
 
-    print("\nAll 14 tools verified successfully!")
+    print("\n" + "=" * 50)
+    print(f"Results: {len(passed)}/{len(passed) + len(failed)} passed")
+    if failed:
+        print(f"FAILED tests ({len(failed)}): {', '.join(failed)}")
+        sys.exit(1)
+    else:
+        print("ALL TESTS PASSED SUCCESSFULLY.")
+        sys.exit(0)
 
 if __name__ == "__main__":
     run_tests()
