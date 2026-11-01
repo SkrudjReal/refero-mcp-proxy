@@ -88,18 +88,28 @@ def run_tests():
     except Exception as e:
         check("refero_get_image_instructions", False, str(e))
 
-    # 8. Download screen test
+    # 8. Download screen test (single)
+    test_out = Path("test_download")
     try:
-        test_out = Path("test_download")
         res_dl = s.refero_download_screen(screen_id=screen_id, output_dir=str(test_out))
         dl_ok = res_dl.get("total_downloaded") == 1
-        check("refero_download_screen", dl_ok, f"Downloaded {res_dl.get('files', [{}])[0].get('file_size_kb', 0)} KB")
+        check("refero_download_screen (single)", dl_ok, f"Downloaded {res_dl.get('files', [{}])[0].get('file_size_kb', 0)} KB")
+    except Exception as e:
+        check("refero_download_screen (single)", False, str(e))
+
+    # 8b. Download screen test (multi-slice vertical stitching)
+    try:
+        res_stitch = s.refero_download_screen(screen_id=screen_id, output_dir=str(test_out), stitch=True)
+        stitched_file = test_out / f"screen_{screen_id}_stitched.jpg"
+        has_stitched = any(f.get("type") == "stitched_image" for f in res_stitch.get("files", []))
+        is_on_disk = stitched_file.exists() and stitched_file.stat().st_size > 0
+        check("refero_download_screen (stitch)", has_stitched and is_on_disk, f"Stitched file verified ({round(stitched_file.stat().st_size / 1024, 1)} KB)")
         if test_out.exists():
             for f in test_out.glob("*"):
                 f.unlink()
             test_out.rmdir()
     except Exception as e:
-        check("refero_download_screen", False, str(e))
+        check("refero_download_screen (stitch)", False, str(e))
 
     # 9. Get screen content
     try:

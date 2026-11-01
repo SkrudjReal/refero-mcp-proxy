@@ -163,7 +163,7 @@ claude mcp add refero python /path/to/refero_mcp_server.py
 
 ## Testing
 
-Run the included standalone test suite (enforces strict per-test assertion checks and exits with code 1 on any failure):
+Run the included standalone test suite (enforces strict per-test assertion checks, validates live downloads and Pillow vertical stitching, and exits with code 1 on any failure):
 ```bash
 python test_server.py
 ```
@@ -173,13 +173,14 @@ Output:
 Testing refero-mcp-proxy v2.2.0...
 Total tools registered: 14
   [PASS] refero_search_styles: 2 styles found
-  [PASS] refero_get_style: Style a73148b9-449b-42cd-9f38-86ef694f500e
+  [PASS] refero_get_style: Style a73148b9-449b-42cd-9f38-86ef694f500e verified with valid parsed sections
   [PASS] refero_search_screens: 9 screens retrieved with direct image links
   [PASS] refero_get_screen: Verified screen ID 184751
   [PASS] refero_get_similar_screens: 2 similar screens found
   [PASS] refero_get_screen_image: Full resolution CDN URL and browser guide present
   [PASS] refero_get_image_instructions: Complete CDN and console bypass snippets ready
-  [PASS] refero_download_screen: Downloaded 412.97 KB
+  [PASS] refero_download_screen (single): Downloaded 412.97 KB
+  [PASS] refero_download_screen (stitch): Stitched file verified (4272.1 KB)
   [PASS] refero_get_screen_content: Extracted palette with 5 colors
   [PASS] refero_search_flows: 9 flows discovered
   [PASS] refero_get_flow: Flow 772 with 7 steps
@@ -188,7 +189,7 @@ Total tools registered: 14
   [PASS] refero_get_catalog: 2 total catalog entries
 
 ==================================================
-Results: 14/14 passed
+Results: 15/15 passed
 ALL TESTS PASSED SUCCESSFULLY.
 ```
 

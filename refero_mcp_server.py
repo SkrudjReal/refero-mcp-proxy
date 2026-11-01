@@ -480,12 +480,20 @@ def refero_download_screen(
             continue
 
         urls_to_download = slices if (all_slices or stitch) else [slices[0]]
+        current_session_slices = {}
         for idx, url in enumerate(urls_to_download):
             suffix = f"_{idx}" if len(urls_to_download) > 1 else ""
             filename = f"screen_{sid}{suffix}.jpg"
             dest_path = dest_dir / filename
+            # Clean up any stale file from prior aborted runs
+            if dest_path.exists():
+                try:
+                    dest_path.unlink()
+                except Exception:
+                    pass
             try:
                 size_bytes = download_file(url, dest_path)
+                current_session_slices[idx] = dest_path
                 downloaded.append({
                     "screen_id": sid,
                     "slice_index": idx,
@@ -504,15 +512,16 @@ def refero_download_screen(
             else:
                 try:
                     from PIL import Image
-                    slice_paths = [dest_dir / f"screen_{sid}_{i}.jpg" for i in range(len(urls_to_download))]
-                    missing = [p for p in slice_paths if not p.exists()]
-                    if missing:
+                    # Strictly verify all slices were downloaded in THIS active run
+                    if len(current_session_slices) != len(urls_to_download):
+                        missing_count = len(urls_to_download) - len(current_session_slices)
                         failed.append({
                             "screen_id": sid,
-                            "error": f"Stitching aborted: {len(missing)} of {len(slice_paths)} slices missing from disk"
+                            "error": f"Stitching aborted: {missing_count} of {len(urls_to_download)} slices failed to download in this run"
                         })
                     else:
-                        imgs = [Image.open(p) for p in slice_paths]
+                        ordered_paths = [current_session_slices[i] for i in range(len(urls_to_download))]
+                        imgs = [Image.open(p) for p in ordered_paths]
                         max_w = max(im.width for im in imgs)
                         tot_h = sum(im.height for im in imgs)
                         stitched = Image.new("RGB", (max_w, tot_h))
@@ -527,7 +536,8 @@ def refero_download_screen(
                             "type": "stitched_image",
                             "saved_to": str(stitch_path.resolve()),
                             "file_size_bytes": stitch_path.stat().st_size,
-                            "file_size_kb": round(stitch_path.stat().st_size / 1024, 2)
+                            "file_size_kb": round(stitch_path.stat().st_size / 1024, 2),
+                            "dimensions": {"width": max_w, "height": tot_h}
                         })
                 except ImportError:
                     failed.append({
