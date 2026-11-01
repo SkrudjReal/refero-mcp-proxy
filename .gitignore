@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local environments & credentials
+.env
+.env.*
+*.token
+*.key
+*.pem
+
+# Screenshots and downloaded assets
+screenshots/
+test_download/
+
+# External repos & tooling
+mcp-exploit-tools/
+
+# Logs & temp files
+*.log
+*.tmp
+.DS_Store
+
+# IDE configs
+.vscode/
+.idea/
