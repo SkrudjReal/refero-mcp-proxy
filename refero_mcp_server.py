@@ -28,8 +28,26 @@ REFERO_STYLES_BASE = "https://styles.refero.design"
 REFERO_WEB_BASE = "https://refero.design"
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
+import sqlite3
+
 # Optional token from environment if user wants authenticated access
 AUTH_TOKEN = os.environ.get("REFERO_TOKEN", "").strip()
+
+# Local offline storage paths
+DATA_DIR = Path(__file__).resolve().parent / "data"
+DB_PATH = DATA_DIR / "refero_local.db"
+OFFLINE_MODE = os.environ.get("REFERO_OFFLINE", "").strip().lower() in ("1", "true", "yes")
+
+def get_db_conn() -> Optional[sqlite3.Connection]:
+    """Returns connection to local SQLite database if initialized."""
+    if DB_PATH.exists():
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            conn.row_factory = sqlite3.Row
+            return conn
+        except Exception:
+            return None
+    return None
 
 # In-memory caches for fast lookup
 STYLE_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -132,11 +150,24 @@ def enrich_screen_record(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def index_sites_screens():
-    """Fetches /v1/sites once and indexes all contained screens by numeric ID and UUID."""
+    """Fetches /v1/sites once (or loads from local catalog) and indexes all contained screens by numeric ID and UUID."""
     global RAW_SITES_CACHE
     if RAW_SITES_CACHE is not None:
         return
-    raw = http_get(f"{REFERO_API_BASE}/v1/sites", is_json=True)
+
+    # Check local catalog on disk first
+    local_sites_full = DATA_DIR / "catalogs" / "sites_full.json"
+    raw = None
+    if local_sites_full.exists():
+        try:
+            with open(local_sites_full, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception:
+            raw = None
+
+    if raw is None and not OFFLINE_MODE:
+        raw = http_get(f"{REFERO_API_BASE}/v1/sites", is_json=True)
+
     if isinstance(raw, list):
         RAW_SITES_CACHE = raw
         for site in raw:
@@ -153,9 +184,45 @@ def index_sites_screens():
 # =====================================================================
 
 def load_styles_catalog(max_pages: int = 5):
-    """Scrapes and caches design systems from styles.refero.design."""
+    """Loads styles from local disk index or scrapes styles.refero.design."""
     global STYLE_CATALOG_LOADED
     if STYLE_CATALOG_LOADED and len(STYLE_CACHE) > 0:
+        return
+
+    # 1. Check local styles master index on disk
+    local_styles_index = DATA_DIR / "styles" / "index.json"
+    if local_styles_index.exists():
+        try:
+            with open(local_styles_index, "r", encoding="utf-8") as f:
+                items = json.load(f)
+                for item in items:
+                    sid = item.get("id")
+                    if sid and sid not in STYLE_CACHE:
+                        STYLE_CACHE[sid] = item
+                if len(STYLE_CACHE) > 0:
+                    STYLE_CATALOG_LOADED = True
+                    return
+        except Exception:
+            pass
+
+    # 2. Check local SQLite styles table
+    conn = get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT id, site_name, url FROM styles")
+            for r in cur.fetchall():
+                sid = r["id"]
+                if sid not in STYLE_CACHE:
+                    STYLE_CACHE[sid] = {"id": sid, "siteName": r["site_name"], "url": r["url"]}
+            if len(STYLE_CACHE) > 0:
+                STYLE_CATALOG_LOADED = True
+                return
+        except Exception:
+            pass
+
+    if OFFLINE_MODE:
+        STYLE_CATALOG_LOADED = True
         return
 
     for page in range(1, max_pages + 1):
@@ -218,6 +285,36 @@ def refero_get_style(style_id: Optional[str] = None, style_ids: Optional[List[st
                 if info["siteName"].lower() == sid.lower():
                     target_uuid = cuid
                     break
+
+        # Check local disk DESIGN.md / spec.json first
+        local_spec_dir = DATA_DIR / "styles" / target_uuid
+        local_md_file = local_spec_dir / "DESIGN.md"
+        local_json_file = local_spec_dir / "spec.json"
+        if local_md_file.exists():
+            try:
+                with open(local_md_file, "r", encoding="utf-8") as f:
+                    cached_md = f.read()
+                if response_format == "json" and local_json_file.exists():
+                    with open(local_json_file, "r", encoding="utf-8") as f:
+                        cached_json = json.load(f)
+                    results.append({
+                        "style_id": target_uuid,
+                        "meta": cached_json.get("meta", {}),
+                        "parsed_result": cached_json,
+                        "design_spec_length": len(cached_md),
+                        "design_spec": cached_md,
+                        "source": "local_offline_mirror"
+                    })
+                    continue
+                elif response_format == "md":
+                    results.append(cached_md)
+                    continue
+            except Exception:
+                pass
+
+        if OFFLINE_MODE:
+            results.append(f"# ERROR: Specification not found offline for style {target_uuid}")
+            continue
 
         url = f"{REFERO_STYLES_BASE}/style/{target_uuid}"
         html = http_get(url)
@@ -289,23 +386,65 @@ def refero_search_screens(query: str, platform: str = "web", order: str = "trend
     Search real UI screens using semantic search across web and iOS products.
     Order can be 'trending', 'latest', or 'oldest' to bypass single-page limits.
     Enriches all records with direct lossless image links and Markdown/HTML embeds.
+    Seamlessly falls back to local SQLite database when offline or if remote API fails.
     """
-    encoded_q = urllib.parse.quote(query)
-    ep = "search/apps" if platform == "ios" else "search"
-    url = f"{REFERO_API_BASE}/v1/{ep}?query={encoded_q}&order={order}&page={page}&per_page={per_page}"
-    data = http_get(url, is_json=True)
-    if isinstance(data, dict):
-        data["browser_paywall_note"] = "On refero.design web, a client-side paywall activates on card #12. This direct API returns all records unblocked."
-        records = data.get("records", [])
-        if isinstance(records, list):
-            data["records"] = [enrich_screen_record(r) for r in records]
-    return data
+    data = None
+    if not OFFLINE_MODE:
+        encoded_q = urllib.parse.quote(query)
+        ep = "search/apps" if platform == "ios" else "search"
+        url = f"{REFERO_API_BASE}/v1/{ep}?query={encoded_q}&order={order}&page={page}&per_page={per_page}"
+        data = http_get(url, is_json=True)
+        if isinstance(data, dict) and "records" in data and len(data["records"]) > 0:
+            data["browser_paywall_note"] = "On refero.design web, a client-side paywall activates on card #12. This direct API returns all records unblocked."
+            data["records"] = [enrich_screen_record(r) for r in data["records"]]
+            return data
+
+    # Local SQLite offline search fallback
+    conn = get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            q_like = f"%{query}%"
+            offset = (page - 1) * per_page
+            cur.execute("""
+                SELECT raw_json FROM screens
+                WHERE (platform = ? OR ? = '')
+                  AND (site_name LIKE ? OR domain LIKE ? OR page_title LIKE ? OR page_url LIKE ? OR colors_json LIKE ? OR raw_json LIKE ?)
+                LIMIT ? OFFSET ?
+            """, (platform, platform, q_like, q_like, q_like, q_like, q_like, q_like, per_page, offset))
+            rows = cur.fetchall()
+            records = []
+            for r in rows:
+                try:
+                    records.append(enrich_screen_record(json.loads(r["raw_json"])))
+                except Exception:
+                    pass
+            cur.execute("""
+                SELECT COUNT(*) FROM screens
+                WHERE (platform = ? OR ? = '')
+                  AND (site_name LIKE ? OR domain LIKE ? OR page_title LIKE ? OR page_url LIKE ? OR colors_json LIKE ? OR raw_json LIKE ?)
+            """, (platform, platform, q_like, q_like, q_like, q_like, q_like, q_like))
+            total_count = cur.fetchone()[0]
+            return {
+                "source": "local_offline_db",
+                "query": query,
+                "platform": platform,
+                "page": page,
+                "per_page": per_page,
+                "total_records": total_count,
+                "records": records
+            }
+        except Exception:
+            pass
+
+    return data if isinstance(data, dict) else {"error": "Failed to search screens", "records": []}
 
 
 def refero_get_screen(screen_id: Optional[Union[str, int]] = None, screen_ids: Optional[List[Union[str, int]]] = None) -> Any:
     """
     Get full details for one or more screens by numeric ID or UUID.
-    Uses official /v1/screenshots/{uuid} and /v1/app_screenshots/{uuid} endpoints.
+    Uses official /v1/screenshots/{uuid} and /v1/app_screenshots/{uuid} endpoints,
+    with instant fallback to local SQLite offline mirror.
     """
     targets = []
     if screen_ids:
@@ -323,7 +462,24 @@ def refero_get_screen(screen_id: Optional[Union[str, int]] = None, screen_ids: O
             results.append(SCREEN_CACHE_BY_ID[sid])
             continue
 
-        # 2. If it is a UUID (contains hyphens or 32+ hex chars)
+        # 2. Check local SQLite screens table
+        conn = get_db_conn()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT raw_json FROM screens WHERE id = ? OR uuid = ?", (sid, sid))
+                row = cur.fetchone()
+                if row:
+                    results.append(enrich_screen_record(json.loads(row["raw_json"])))
+                    continue
+            except Exception:
+                pass
+
+        if OFFLINE_MODE:
+            results.append({"error": "Screen not found in local offline database", "screen_id": sid})
+            continue
+
+        # 3. If it is a UUID (contains hyphens or 32+ hex chars)
         is_uuid = bool(re.search(r'[0-9a-f]{8}-[0-9a-f]{4}', sid))
         if is_uuid:
             # Query web screenshots show
@@ -337,7 +493,7 @@ def refero_get_screen(screen_id: Optional[Union[str, int]] = None, screen_ids: O
                 results.append(enrich_screen_record(data_app))
                 continue
 
-        # 3. If numeric ID, index sites screens or query
+        # 4. If numeric ID, index sites screens or query
         index_sites_screens()
         if sid in SCREEN_CACHE_BY_ID:
             results.append(SCREEN_CACHE_BY_ID[sid])
@@ -371,22 +527,64 @@ def refero_get_similar_screens(screen_id: Union[str, int], limit: int = 10, plat
     else:
         target_id = sid_str
 
-    encoded_id = urllib.parse.quote(str(target_id))
-    ep = "app_screenshots" if platform == "ios" else "screenshots"
-    url = f"{REFERO_API_BASE}/v1/{ep}/{encoded_id}/similar"
-    data = http_get(url, is_json=True)
-    if isinstance(data, dict) and "records" in data:
-        recs = data["records"][:limit]
-        data["records"] = [enrich_screen_record(r) for r in recs]
-        return data
+    if not OFFLINE_MODE:
+        encoded_id = urllib.parse.quote(str(target_id))
+        ep = "app_screenshots" if platform == "ios" else "screenshots"
+        url = f"{REFERO_API_BASE}/v1/{ep}/{encoded_id}/similar"
+        data = http_get(url, is_json=True)
+        if isinstance(data, dict) and "records" in data and len(data["records"]) > 0:
+            recs = data["records"][:limit]
+            data["records"] = [enrich_screen_record(r) for r in recs]
+            return data
 
-    alt_ep = "screenshots" if ep == "app_screenshots" else "app_screenshots"
-    url_alt = f"{REFERO_API_BASE}/v1/{alt_ep}/{encoded_id}/similar"
-    data_alt = http_get(url_alt, is_json=True)
-    if isinstance(data_alt, dict) and "records" in data_alt:
-        recs = data_alt["records"][:limit]
-        data_alt["records"] = [enrich_screen_record(r) for r in recs]
-        return data_alt
+        alt_ep = "screenshots" if ep == "app_screenshots" else "app_screenshots"
+        url_alt = f"{REFERO_API_BASE}/v1/{alt_ep}/{encoded_id}/similar"
+        data_alt = http_get(url_alt, is_json=True)
+        if isinstance(data_alt, dict) and "records" in data_alt and len(data_alt["records"]) > 0:
+            recs = data_alt["records"][:limit]
+            data_alt["records"] = [enrich_screen_record(r) for r in recs]
+            return data_alt
+
+    # Local SQLite offline similar screens fallback
+    orig = refero_get_screen(screen_id=screen_id)
+    domain = ""
+    if isinstance(orig, dict):
+        site_dict = orig.get("site")
+        domain = orig.get("domain") or (site_dict.get("domain") if isinstance(site_dict, dict) else "")
+
+    conn = get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            if domain:
+                cur.execute("""
+                    SELECT raw_json FROM screens
+                    WHERE id != ? AND domain = ?
+                    LIMIT ?
+                """, (str(screen_id), domain, limit))
+                rows = cur.fetchall()
+            else:
+                rows = []
+
+            if not rows:
+                cur.execute("SELECT raw_json FROM screens WHERE id != ? LIMIT ?", (str(screen_id), limit))
+                rows = cur.fetchall()
+
+            records = []
+            for r in rows:
+                try:
+                    records.append(enrich_screen_record(json.loads(r["raw_json"])))
+                except Exception:
+                    pass
+
+            return {
+                "source": "local_offline_db",
+                "screen_id": screen_id,
+                "count": len(records),
+                "records": records
+            }
+        except Exception:
+            pass
 
     return {"error": "Failed to fetch similar screens", "screen_id": screen_id}
 
@@ -415,6 +613,21 @@ def refero_get_screen_image(screen_id: Union[str, int], image_size: str = "full"
     site_info = screen.get("site")
     site_name = site_info.get("name") if isinstance(site_info, dict) else screen.get("domain", f"Screen {screen_id}")
 
+    local_files = []
+    uuid_str = screen.get("uuid") or str(screen_id)
+    for check_dir in [DATA_DIR / "media", DATA_DIR / "screenshots", Path.cwd() / "screenshots"]:
+        if check_dir.exists():
+            matched = list(check_dir.glob(f"**/*{uuid_str}*"))
+            if not matched:
+                matched = list(check_dir.glob(f"**/*screen_{screen_id}*"))
+            for mf in matched:
+                if mf.is_file() and mf.stat().st_size > 1024:
+                    local_files.append({
+                        "file_path": str(mf.resolve()),
+                        "file_size_kb": round(mf.stat().st_size / 1024, 2),
+                        "file_uri": mf.resolve().as_uri()
+                    })
+
     return {
         "screen_id": screen_id,
         "uuid": screen.get("uuid"),
@@ -426,6 +639,8 @@ def refero_get_screen_image(screen_id: Union[str, int], image_size: str = "full"
         "preview_url": screen.get("preview_url"),
         "all_slices_urls": img_urls,
         "slices_count": len(img_urls),
+        "is_locally_cached": len(local_files) > 0,
+        "local_files": local_files,
         "markdown_embed": f"![{site_name}]({selected_url})",
         "html_embed": f'<img src="{selected_url}" alt="{site_name}" />',
         "download_command": f"refero_download_screen(screen_id='{screen_id}')",
@@ -631,15 +846,59 @@ def refero_get_screen_content(screen_id: Union[str, int]) -> Dict[str, Any]:
 # =====================================================================
 
 def refero_search_flows(query: str, platform: str = "web", page: int = 1) -> Dict[str, Any]:
-    """Search multi-step user journey flows (onboarding, checkout, signup, settings)."""
-    encoded_q = urllib.parse.quote(query)
-    ep = "search_flow/apps" if platform == "ios" else "search_flow"
-    url = f"{REFERO_API_BASE}/v1/{ep}?query={encoded_q}&page={page}"
-    return http_get(url, is_json=True)
+    """Search multi-step user journey flows with online API and local SQLite fallback."""
+    data = None
+    if not OFFLINE_MODE:
+        encoded_q = urllib.parse.quote(query)
+        ep = "search_flow/apps" if platform == "ios" else "search_flow"
+        url = f"{REFERO_API_BASE}/v1/{ep}?query={encoded_q}&page={page}"
+        data = http_get(url, is_json=True)
+        if isinstance(data, dict) and "records" in data and len(data["records"]) > 0:
+            return data
+
+    # Local SQLite fallback
+    conn = get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            q_like = f"%{query}%"
+            per_page = 10
+            offset = (page - 1) * per_page
+            cur.execute("""
+                SELECT raw_json FROM flows
+                WHERE (platform = ? OR ? = '')
+                  AND (title LIKE ? OR description LIKE ? OR site_name LIKE ? OR domain LIKE ?)
+                LIMIT ? OFFSET ?
+            """, (platform, platform, q_like, q_like, q_like, q_like, per_page, offset))
+            rows = cur.fetchall()
+            records = []
+            for r in rows:
+                try:
+                    records.append(json.loads(r["raw_json"]))
+                except Exception:
+                    pass
+            cur.execute("""
+                SELECT COUNT(*) FROM flows
+                WHERE (platform = ? OR ? = '')
+                  AND (title LIKE ? OR description LIKE ? OR site_name LIKE ? OR domain LIKE ?)
+            """, (platform, platform, q_like, q_like, q_like, q_like))
+            total_count = cur.fetchone()[0]
+            return {
+                "source": "local_offline_db",
+                "query": query,
+                "platform": platform,
+                "page": page,
+                "total_records": total_count,
+                "records": records
+            }
+        except Exception:
+            pass
+
+    return data if isinstance(data, dict) else {"error": "Failed to search flows", "records": []}
 
 
 def refero_get_flow(flow_id: Optional[Union[int, str]] = None, flow_ids: Optional[List[Union[int, str]]] = None) -> Any:
-    """Get full multi-step journey sequence, screenshots, and transition details for flow ID(s), enriched with image embeds."""
+    """Get full multi-step journey sequence with online API and local SQLite fallback."""
     targets = []
     if flow_ids:
         targets = flow_ids
@@ -648,6 +907,28 @@ def refero_get_flow(flow_id: Optional[Union[int, str]] = None, flow_ids: Optiona
 
     results = []
     for fid in targets:
+        # Check local SQLite flows table first
+        conn = get_db_conn()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT raw_json FROM flows WHERE id = ?", (str(fid),))
+                row = cur.fetchone()
+                if row:
+                    f_dict = json.loads(row["raw_json"])
+                    scrs = f_dict.get("screenshots", [])
+                    if isinstance(scrs, list):
+                        f_dict["screenshots"] = [enrich_screen_record(s) for s in scrs]
+                        f_dict["step_count"] = len(scrs)
+                    results.append(f_dict)
+                    continue
+            except Exception:
+                pass
+
+        if OFFLINE_MODE:
+            results.append({"error": "Flow not found in local offline database", "flow_id": fid})
+            continue
+
         url = f"{REFERO_API_BASE}/v1/flows/{fid}"
         data = http_get(url, is_json=True)
         if isinstance(data, dict):
@@ -700,7 +981,7 @@ def refero_search_app(query: str, page: int = 1, per_page: int = 10) -> Dict[str
 
 def refero_get_catalog(catalog_type: str = "sites", search: str = "", limit: int = 50) -> Dict[str, Any]:
     """
-    Get instant static database dump of all Web sites or iOS applications from S3.
+    Get instant static database dump of all Web sites or iOS applications from local mirror or S3.
     Requires ZERO tokens and zero authentication.
     """
     global CATALOG_APPS_CACHE, CATALOG_SITES_CACHE
@@ -709,11 +990,27 @@ def refero_get_catalog(catalog_type: str = "sites", search: str = "", limit: int
 
     if is_app:
         if CATALOG_APPS_CACHE is None:
-            CATALOG_APPS_CACHE = http_get(f"{REFERO_WEB_BASE}/json/apps.json", is_json=True)
+            local_apps = DATA_DIR / "catalogs" / "apps.json"
+            if local_apps.exists():
+                try:
+                    with open(local_apps, "r", encoding="utf-8") as f:
+                        CATALOG_APPS_CACHE = json.load(f)
+                except Exception:
+                    pass
+            if CATALOG_APPS_CACHE is None and not OFFLINE_MODE:
+                CATALOG_APPS_CACHE = http_get(f"{REFERO_WEB_BASE}/json/apps.json", is_json=True)
         items = CATALOG_APPS_CACHE if isinstance(CATALOG_APPS_CACHE, list) else []
     else:
         if CATALOG_SITES_CACHE is None:
-            CATALOG_SITES_CACHE = http_get(f"{REFERO_WEB_BASE}/json/sites.json", is_json=True)
+            local_sites = DATA_DIR / "catalogs" / "sites.json"
+            if local_sites.exists():
+                try:
+                    with open(local_sites, "r", encoding="utf-8") as f:
+                        CATALOG_SITES_CACHE = json.load(f)
+                except Exception:
+                    pass
+            if CATALOG_SITES_CACHE is None and not OFFLINE_MODE:
+                CATALOG_SITES_CACHE = http_get(f"{REFERO_WEB_BASE}/json/sites.json", is_json=True)
         items = CATALOG_SITES_CACHE if isinstance(CATALOG_SITES_CACHE, list) else []
 
     if search:

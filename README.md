@@ -12,6 +12,7 @@ A standalone, zero-dependency Python Model Context Protocol (MCP) server providi
 - **Curated Design Systems**: Automated extraction of `DESIGN.md` specs (colors, typography, spacing, guidelines) from `styles.refero.design`.
 - **Zero-Auth Asset Pipeline**: Direct CDN image links, Markdown/HTML embeds, local disk batch downloading, and multi-slice stitching.
 - **Paywall Bypass Architecture**: Complete client-side paywall breakdown, DevTools unlock snippets, and API sorting rotation.
+- **Complete Offline Mirror & Local SQLite Engine**: Tooling to dump all 1,342 design systems, catalogs, flows, and screens locally to run 100% independent of Refero's servers.
 
 ---
 
@@ -158,6 +159,46 @@ claude mcp add refero python /path/to/refero_mcp_server.py
   }
 }
 ```
+
+---
+
+## Full Local Mirror & Autonomous Offline Operation
+
+To operate completely independently of `refero.design` and `styles.refero.design`, use the built-in mirroring orchestrator (`mirror_refero.py`):
+
+```bash
+# 1. Mirror catalogs, frontend bundles, and index 3,000+ screens
+python mirror_refero.py --catalogs
+
+# 2. Dump all 1,342 design systems & AI prompt specs (DESIGN.md + JSON tokens)
+python mirror_refero.py --styles --workers 12
+
+# 3. Mirror all 52 AI prompt collections (/ai-agents/...)
+python mirror_refero.py --collections
+
+# 4. Scrape UX journey flows across all core product patterns
+python mirror_refero.py --flows --workers 10
+
+# 5. Check local database status
+python mirror_refero.py --status
+```
+
+### Media Assets Downloader (Screenshots & Slices)
+The mirror engine builds an atomic, resumable SQLite queue (`data/refero_local.db`) tracking all 2732px lossless image URLs:
+```bash
+# Download only hero/primary screenshots for each screen (~20-40 GB)
+python mirror_refero.py --download-images --hero-only --workers 10
+
+# Download all vertical slices of every screen
+python mirror_refero.py --download-images --workers 12
+```
+
+### Running the MCP Server in 100% Offline Mode
+Set `REFERO_OFFLINE=1` to force zero network calls; all 14 tools will query `data/refero_local.db` and `data/styles/` directly from disk:
+```bash
+REFERO_OFFLINE=1 python refero_mcp_server.py
+```
+*(In normal mode, the server operates with seamless dual-mode routing: live requests are attempted first, with instant transparent fallback to the local offline database on any connection failure).*
 
 ---
 

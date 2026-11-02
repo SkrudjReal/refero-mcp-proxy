@@ -13,6 +13,7 @@ __pycache__/
 # Screenshots and downloaded assets
 screenshots/
 test_download/
+data/
 
 # External repos & tooling
 mcp-exploit-tools/
