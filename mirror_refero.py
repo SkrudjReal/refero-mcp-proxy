@@ -15,6 +15,7 @@ import sys
 import os
 import re
 import json
+import math
 import sqlite3
 import argparse
 import time
@@ -30,6 +31,8 @@ REFERO_WEB_BASE = "https://refero.design"
 REFERO_STYLES_BASE = "https://styles.refero.design"
 REFERO_IMAGES_BASE = "https://images.refero.design"
 
+AUTH_TOKEN = os.environ.get("REFERO_TOKEN", "").strip()
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 CATALOGS_DIR = DATA_DIR / "catalogs"
@@ -41,8 +44,11 @@ DB_PATH = DATA_DIR / "refero_local.db"
 
 
 def fetch_url(url: str, is_json: bool = False, timeout: int = 15, retries: int = 3) -> Any:
-    """Fetch URL with retries, timeout, and custom user-agent."""
-    headers = {"User-Agent": USER_AGENT, "Accept": "application/json" if is_json else "*/*"}
+    """Fetch URL with retries, timeout, custom user-agent, and optional Bearer auth."""
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json" if is_json else "*/*", "ngrok-skip-browser-warning": "1"}
+    if AUTH_TOKEN:
+        headers["Authorization"] = f"Bearer {AUTH_TOKEN}" if not AUTH_TOKEN.startswith("Bearer ") else AUTH_TOKEN
+
     for attempt in range(retries):
         try:
             req = urllib.request.Request(url, headers=headers)
@@ -653,33 +659,46 @@ def dump_topic_flows(workers: int = 8) -> int:
 
 
 def queue_screen_images(conn: sqlite3.Connection, scr: Dict[str, Any], platform: str = "web"):
-    """Inserts image URLs into media_queue for subsequent batch downloading."""
+    """Inserts image URLs into media_queue for subsequent batch downloading, computing slices by ceil(height/1536)."""
     sid = str(scr.get("id", ""))
+    uuid = scr.get("uuid", "")
+    height = scr.get("height") or 0
+    site_info = scr.get("site", {})
+    domain = (site_info.get("domain") if isinstance(site_info, dict) else "") or scr.get("domain", "")
+    app_id = scr.get("app_id") or ""
+
     urls = []
     raw_url = scr.get("url")
     if isinstance(raw_url, list):
         urls.extend(raw_url)
     elif isinstance(raw_url, str):
         urls.append(raw_url)
+
+    # If slices not explicitly listed in record, construct using exact CDN math
+    if not urls and uuid:
+        slice_count = max(1, math.ceil(height / 1536)) if height > 0 else 1
+        if platform == "ios" or app_id:
+            urls = [f"https://images.refero.design/app_screenshots/{app_id}/{uuid}/{i}.jpg" for i in range(slice_count)]
+        elif domain:
+            urls = [f"https://images.refero.design/screenshots/{domain}/desktop/{uuid}/{i}.jpg" for i in range(slice_count)]
+
     if not urls and scr.get("preview_url"):
         urls.append(scr["preview_url"])
-        
+
     for idx, u in enumerate(urls):
         if not u or not isinstance(u, str):
             continue
-        # Deduce local filename
-        ext = ".jpg"
         clean_url = u.split("?")[0]
         subpath = clean_url.replace("https://images.refero.design/", "")
         local_path = str(SCREENSHOTS_DIR / subpath)
-        
+
         conn.execute("""
             INSERT OR IGNORE INTO media_queue (url, screen_id, platform, slice_index, local_path, downloaded)
             VALUES (?, ?, ?, ?, ?, 0)
         """, (u, sid, platform, idx, local_path))
 
 
-def dump_screens_metadata(platform: str = "web", max_pages: int = 50, workers: int = 8) -> int:
+def dump_screens_metadata(platform: str = "web", max_pages: int = 3214, workers: int = 12) -> int:
     """Scrapes screen records from /v1/search or /v1/search/apps and indexes into SQLite using concurrent workers."""
     conn = init_database()
     ep = "search/apps" if platform == "ios" else "search"
@@ -688,7 +707,7 @@ def dump_screens_metadata(platform: str = "web", max_pages: int = 50, workers: i
     if not isinstance(first_page, dict):
         return 0
     pag = first_page.get("pagination", {})
-    total_pages = min(max_pages, pag.get("pages", 100))
+    total_pages = min(max_pages, pag.get("pages", 3214))
     print(f"[*] Scraping {total_pages} {platform.upper()} screens pages using {workers} worker threads...")
     
     pages_to_fetch = list(range(1, total_pages + 1))
