@@ -722,9 +722,24 @@ def refero_download_screen(
 
         # Vertical stitching if requested
         if stitch:
-            if len(urls_to_download) <= 1:
-                pass
-            else:
+            if len(urls_to_download) == 1 and current_session_slices:
+                # Single slice: image is already complete, provide stitched alias
+                single_path = current_session_slices[0]
+                stitched_path = dest_dir / f"screen_{sid}_stitched.jpg"
+                try:
+                    import shutil
+                    shutil.copyfile(single_path, stitched_path)
+                    downloaded.append({
+                        "screen_id": sid,
+                        "type": "stitched_image",
+                        "local_path": str(stitched_path.resolve()),
+                        "file_size_bytes": stitched_path.stat().st_size,
+                        "file_size_kb": round(stitched_path.stat().st_size / 1024, 2),
+                        "slices_merged": 1
+                    })
+                except Exception:
+                    pass
+            elif len(urls_to_download) > 1:
                 try:
                     from PIL import Image
                     # Strictly verify all slices were downloaded in THIS active run
