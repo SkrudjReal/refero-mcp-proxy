@@ -16,11 +16,13 @@ import urllib.request
 import urllib.parse
 import re
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
 SERVER_NAME = "refero-mcp-proxy"
-SERVER_VERSION = "2.2.0"
+SERVER_VERSION = "2.2.1"
 
 REFERO_API_BASE = "https://api.refero.design"
 REFERO_CHAT_BASE = "https://chat.refero.design"
@@ -61,6 +63,8 @@ RAW_SITES_CACHE: Optional[List[Dict[str, Any]]] = None
 
 def http_get(url: str, is_json: bool = False, custom_headers: Optional[Dict[str, str]] = None) -> Any:
     """Performs HTTP GET with error handling and optional authentication."""
+    if OFFLINE_MODE:
+        return {"error": "Network access is disabled by REFERO_OFFLINE"}
     headers = {
         "User-Agent": DEFAULT_USER_AGENT,
         "Accept": "application/json" if is_json else "*/*",
@@ -90,15 +94,46 @@ def http_get(url: str, is_json: bool = False, custom_headers: Optional[Dict[str,
 
 
 def download_file(url: str, dest_path: Path) -> int:
-    """Downloads a binary file (e.g. screenshot image) to destination path."""
+    """Replace the destination only after a complete download or offline copy."""
     dest_path.parent.mkdir(parents=True, exist_ok=True)
-    headers = {"User-Agent": DEFAULT_USER_AGENT}
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=25) as resp:
-        content = resp.read()
-        with open(dest_path, "wb") as f:
-            f.write(content)
-        return len(content)
+    local_path = None
+    if OFFLINE_MODE:
+        conn = get_db_conn()
+        if conn:
+            try:
+                row = conn.execute("SELECT local_path FROM media_queue WHERE url = ? AND downloaded = 1", (url,)).fetchone()
+                if row and Path(row["local_path"]).is_file():
+                    local_path = Path(row["local_path"])
+            except sqlite3.Error:
+                pass
+            finally:
+                conn.close()
+        if local_path is None:
+            parsed = urllib.parse.urlsplit(url)
+            relative = Path(urllib.parse.unquote(parsed.path).lstrip("/"))
+            media_root = (DATA_DIR / "media").resolve()
+            candidate = (media_root / relative).resolve()
+            if parsed.hostname == "images.refero.design" and media_root in candidate.parents and candidate.is_file():
+                local_path = candidate
+        if local_path is None:
+            raise FileNotFoundError("Image not found in local offline mirror")
+
+    tmp_path = None
+    try:
+        source = open(local_path, "rb") if local_path else urllib.request.urlopen(
+            urllib.request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT}), timeout=25
+        )
+        with source, tempfile.NamedTemporaryFile(dir=dest_path.parent, suffix=".tmp", delete=False) as out:
+            tmp_path = Path(out.name)
+            shutil.copyfileobj(source, out)
+            size = out.tell()
+        if not size:
+            raise ValueError("Image response is empty")
+        tmp_path.replace(dest_path)
+        return size
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink()
 
 
 def extract_primary_image_url(record: Dict[str, Any]) -> Optional[str]:
@@ -220,6 +255,8 @@ def load_styles_catalog(max_pages: int = 5):
                 return
         except Exception:
             pass
+        finally:
+            conn.close()
 
     if OFFLINE_MODE:
         STYLE_CATALOG_LOADED = True
@@ -253,6 +290,8 @@ def load_styles_catalog(max_pages: int = 5):
 def refero_search_styles(query: str = "", limit: int = 10) -> Dict[str, Any]:
     """Search design styles by query keyword (e.g. 'Apple', 'Cursor', 'Minimal')."""
     load_styles_catalog()
+    if OFFLINE_MODE and not STYLE_CACHE:
+        return {"error": "Styles catalog not found in local offline mirror"}
     q_lower = query.lower().strip()
     matches = []
     for sid, info in STYLE_CACHE.items():
@@ -288,6 +327,8 @@ def refero_get_style(style_id: Optional[str] = None, style_ids: Optional[List[st
 
         # Check local disk DESIGN.md / spec.json first
         local_spec_dir = DATA_DIR / "styles" / target_uuid
+        if (DATA_DIR / "styles").resolve() not in local_spec_dir.resolve().parents:
+            raise ValueError("Style ID must stay within the styles directory")
         local_md_file = local_spec_dir / "DESIGN.md"
         local_json_file = local_spec_dir / "spec.json"
         if local_md_file.exists():
@@ -313,7 +354,8 @@ def refero_get_style(style_id: Optional[str] = None, style_ids: Optional[List[st
                 pass
 
         if OFFLINE_MODE:
-            results.append(f"# ERROR: Specification not found offline for style {target_uuid}")
+            error = f"Specification not found offline for style {target_uuid}"
+            results.append({"error": error, "style_id": target_uuid} if response_format == "json" else f"# ERROR: {error}")
             continue
 
         url = f"{REFERO_STYLES_BASE}/style/{target_uuid}"
@@ -358,7 +400,9 @@ def refero_get_style(style_id: Optional[str] = None, style_ids: Optional[List[st
                 md += f"## Typography\n```json\n{json.dumps(ds['typography'], indent=2)}\n```\n\n"
             design_md = md
 
-        if response_format == "json":
+        if response_format == "json" and not parsed_result:
+            results.append({"error": "Specification not found", "style_id": target_uuid})
+        elif response_format == "json":
             results.append({
                 "style_id": target_uuid,
                 "meta": meta,
@@ -436,6 +480,8 @@ def refero_search_screens(query: str, platform: str = "web", order: str = "trend
             }
         except Exception:
             pass
+        finally:
+            conn.close()
 
     return data if isinstance(data, dict) else {"error": "Failed to search screens", "records": []}
 
@@ -474,6 +520,8 @@ def refero_get_screen(screen_id: Optional[Union[str, int]] = None, screen_ids: O
                     continue
             except Exception:
                 pass
+            finally:
+                conn.close()
 
         if OFFLINE_MODE:
             results.append({"error": "Screen not found in local offline database", "screen_id": sid})
@@ -585,6 +633,8 @@ def refero_get_similar_screens(screen_id: Union[str, int], limit: int = 10, plat
             }
         except Exception:
             pass
+        finally:
+            conn.close()
 
     return {"error": "Failed to fetch similar screens", "screen_id": screen_id}
 
@@ -671,6 +721,8 @@ def refero_download_screen(
 
     if not targets:
         return {"error": "Either screen_id or screen_ids must be provided"}
+    if any(not re.fullmatch(r"[\w-]+", sid) for sid in targets):
+        raise ValueError("Screen IDs must be numeric IDs or UUIDs")
 
     dest_dir = Path(output_dir) if output_dir else Path.cwd() / "screenshots"
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -700,12 +752,6 @@ def refero_download_screen(
             suffix = f"_{idx}" if len(urls_to_download) > 1 else ""
             filename = f"screen_{sid}{suffix}.jpg"
             dest_path = dest_dir / filename
-            # Clean up any stale file from prior aborted runs
-            if dest_path.exists():
-                try:
-                    dest_path.unlink()
-                except Exception:
-                    pass
             try:
                 size_bytes = download_file(url, dest_path)
                 current_session_slices[idx] = dest_path
@@ -727,7 +773,6 @@ def refero_download_screen(
                 single_path = current_session_slices[0]
                 stitched_path = dest_dir / f"screen_{sid}_stitched.jpg"
                 try:
-                    import shutil
                     shutil.copyfile(single_path, stitched_path)
                     downloaded.append({
                         "screen_id": sid,
@@ -737,8 +782,8 @@ def refero_download_screen(
                         "file_size_kb": round(stitched_path.stat().st_size / 1024, 2),
                         "slices_merged": 1
                     })
-                except Exception:
-                    pass
+                except Exception as e:
+                    failed.append({"screen_id": sid, "error": f"Stitching failed: {e}"})
             elif len(urls_to_download) > 1:
                 try:
                     from PIL import Image
@@ -774,9 +819,11 @@ def refero_download_screen(
                         "screen_id": sid,
                         "error": "Vertical stitching requires Pillow. Install via: pip install Pillow"
                     })
+                except Exception as e:
+                    failed.append({"screen_id": sid, "error": f"Stitching failed: {e}"})
 
     return {
-        "status": "completed",
+        "status": "completed" if not failed else "partial" if downloaded else "failed",
         "output_directory": str(dest_dir.resolve()),
         "total_downloaded": len(downloaded),
         "total_failed": len(failed),
@@ -908,6 +955,8 @@ def refero_search_flows(query: str, platform: str = "web", page: int = 1) -> Dic
             }
         except Exception:
             pass
+        finally:
+            conn.close()
 
     return data if isinstance(data, dict) else {"error": "Failed to search flows", "records": []}
 
@@ -939,6 +988,8 @@ def refero_get_flow(flow_id: Optional[Union[int, str]] = None, flow_ids: Optiona
                     continue
             except Exception:
                 pass
+            finally:
+                conn.close()
 
         if OFFLINE_MODE:
             results.append({"error": "Flow not found in local offline database", "flow_id": fid})
@@ -965,6 +1016,8 @@ def refero_get_flow(flow_id: Optional[Union[int, str]] = None, flow_ids: Optiona
 def refero_search_site(query: str, page: int = 1, per_page: int = 10) -> Dict[str, Any]:
     """Search web sites, domains, and design collections."""
     index_sites_screens()
+    if RAW_SITES_CACHE is None:
+        return {"error": "Sites catalog unavailable locally or from the remote endpoint"}
     raw = RAW_SITES_CACHE or []
     q_lower = query.lower().strip()
     filtered = []
@@ -989,12 +1042,22 @@ def refero_search_site(query: str, page: int = 1, per_page: int = 10) -> Dict[st
 
 def refero_search_app(query: str, page: int = 1, per_page: int = 10) -> Dict[str, Any]:
     """Search mobile iOS applications and mobile design collections."""
-    encoded_q = urllib.parse.quote(query)
-    url = f"{REFERO_API_BASE}/v1/search/apps?query={encoded_q}&page={page}&per_page={per_page}"
-    return http_get(url, is_json=True)
+    if not OFFLINE_MODE:
+        encoded_q = urllib.parse.quote(query)
+        url = f"{REFERO_API_BASE}/v1/search/apps?query={encoded_q}&page={page}&per_page={per_page}"
+        data = http_get(url, is_json=True)
+        if isinstance(data, dict) and "records" in data:
+            return data
+    catalog = refero_get_catalog("apps", search=query, limit=None)
+    if "error" in catalog:
+        return catalog
+    start = (page - 1) * per_page
+    return {"source": "local_catalog", "query": query, "page": page,
+            "per_page": per_page, "total_count": catalog["total_in_catalog"],
+            "records": catalog["results"][start:start + per_page]}
 
 
-def refero_get_catalog(catalog_type: str = "sites", search: str = "", limit: int = 50) -> Dict[str, Any]:
+def refero_get_catalog(catalog_type: str = "sites", search: str = "", limit: Optional[int] = 50) -> Dict[str, Any]:
     """
     Get instant static database dump of all Web sites or iOS applications from local mirror or S3.
     Requires ZERO tokens and zero authentication.
@@ -1014,7 +1077,10 @@ def refero_get_catalog(catalog_type: str = "sites", search: str = "", limit: int
                     pass
             if CATALOG_APPS_CACHE is None and not OFFLINE_MODE:
                 CATALOG_APPS_CACHE = http_get(f"{REFERO_WEB_BASE}/json/apps.json", is_json=True)
-        items = CATALOG_APPS_CACHE if isinstance(CATALOG_APPS_CACHE, list) else []
+        if not isinstance(CATALOG_APPS_CACHE, list):
+            CATALOG_APPS_CACHE = None
+            return {"error": "Apps catalog unavailable locally or from the remote endpoint"}
+        items = CATALOG_APPS_CACHE
     else:
         if CATALOG_SITES_CACHE is None:
             local_sites = DATA_DIR / "catalogs" / "sites.json"
@@ -1026,7 +1092,10 @@ def refero_get_catalog(catalog_type: str = "sites", search: str = "", limit: int
                     pass
             if CATALOG_SITES_CACHE is None and not OFFLINE_MODE:
                 CATALOG_SITES_CACHE = http_get(f"{REFERO_WEB_BASE}/json/sites.json", is_json=True)
-        items = CATALOG_SITES_CACHE if isinstance(CATALOG_SITES_CACHE, list) else []
+        if not isinstance(CATALOG_SITES_CACHE, list):
+            CATALOG_SITES_CACHE = None
+            return {"error": "Sites catalog unavailable locally or from the remote endpoint"}
+        items = CATALOG_SITES_CACHE
 
     if search:
         s_lower = search.lower().strip()
@@ -1265,78 +1334,117 @@ def handle_call(name: str, args: Dict[str, Any]) -> Any:
         raise ValueError(f"Unknown tool: {name}")
 
 
+def validate_tool_args(tool: Dict[str, Any], args: Any):
+    """Validate the types and bounds used by our published tool schemas."""
+    schema = tool["inputSchema"]
+    if not isinstance(args, dict):
+        raise ValueError("Tool arguments must be an object")
+    if any(key not in args for key in schema.get("required", [])):
+        raise ValueError("Missing required tool argument")
+
+    def validate(value, spec, key):
+        types = spec["type"]
+        types = [types] if isinstance(types, str) else types
+        if not any((kind == "string" and isinstance(value, str)) or
+                   (kind == "integer" and type(value) is int) or
+                   (kind == "boolean" and type(value) is bool) or
+                   (kind == "array" and isinstance(value, list)) for kind in types):
+            raise ValueError(f"Invalid type for {key}")
+        if "enum" in spec and value not in spec["enum"]:
+            raise ValueError(f"Invalid value for {key}")
+        if isinstance(value, list):
+            if not value:
+                raise ValueError(f"{key} cannot be empty")
+            for item in value:
+                validate(item, spec["items"], key)
+        if key.endswith(("_id", "_ids")) and not isinstance(value, list):
+            if not str(value).strip() or str(value) in (".", "..") or any(c in str(value) for c in ("/", "\\", "\0")):
+                raise ValueError(f"Invalid identifier for {key}")
+        if key in ("page", "per_page", "limit") and value < 1:
+            raise ValueError(f"{key} must be positive")
+        if key == "per_page" and value > 50:
+            raise ValueError("per_page must be at most 50")
+
+    for key, value in args.items():
+        spec = schema["properties"].get(key)
+        if spec is None:
+            raise ValueError(f"Unknown argument: {key}")
+        validate(value, spec, key)
+    for key in ("screen_id", "style_id", "flow_id"):
+        if key in schema["properties"] and key + "s" in schema["properties"]:
+            if (key in args) == (key + "s" in args):
+                raise ValueError(f"Provide exactly one of {key} or {key}s")
+
+
+def tool_failed(data: Any) -> bool:
+    if isinstance(data, list):
+        return any(tool_failed(item) for item in data)
+    if isinstance(data, dict):
+        return "error" in data or bool(data.get("total_failed"))
+    return isinstance(data, str) and data.startswith("# ERROR:")
+
+
+def process_request(req: Any) -> Optional[Dict[str, Any]]:
+    """Handle one JSON-RPC message; notifications never receive responses."""
+    resp = {"jsonrpc": "2.0", "id": None}
+    if (not isinstance(req, dict) or req.get("jsonrpc") != "2.0" or
+            not isinstance(req.get("method"), str) or
+            ("id" in req and type(req["id"]) not in (int, str))):
+        resp["error"] = {"code": -32600, "message": "Invalid Request"}
+        return resp
+    if "id" not in req:
+        return None
+    resp["id"] = req["id"]
+    method = req["method"]
+    params = req.get("params", {})
+    if not isinstance(params, dict):
+        resp["error"] = {"code": -32602, "message": "params must be an object"}
+    elif method == "initialize":
+        resp["result"] = {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}
+        }
+    elif method == "ping":
+        resp["result"] = {}
+    elif method == "tools/list":
+        resp["result"] = {"tools": TOOLS}
+    elif method == "tools/call":
+        tool = next((t for t in TOOLS if t["name"] == params.get("name")), None)
+        try:
+            if tool is None:
+                raise ValueError("Unknown tool")
+            validate_tool_args(tool, params.get("arguments", {}))
+        except ValueError as e:
+            resp["error"] = {"code": -32602, "message": str(e)}
+            return resp
+        try:
+            data = handle_call(tool["name"], params.get("arguments", {}))
+        except Exception as e:
+            data = {"error": str(e)}
+        text_out = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, indent=2)
+        resp["result"] = {"content": [{"type": "text", "text": text_out}], "isError": tool_failed(data)}
+    else:
+        resp["error"] = {"code": -32601, "message": f"Method not found: {method}"}
+    return resp
+
+
 def main():
-    """Main JSON-RPC stdio loop for Model Context Protocol."""
+    """Main UTF-8 JSON-RPC stdio loop (including native Windows pipes)."""
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
     for line in sys.stdin:
-        line = line.strip()
-        if not line:
+        if not line.strip():
             continue
         try:
             req = json.loads(line)
-        except Exception:
-            continue
-
-        req_id = req.get("id")
-        method = req.get("method")
-        params = req.get("params", {})
-
-        if method == "initialize":
-            resp = {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}
-                }
-            }
-            sys.stdout.write(json.dumps(resp) + "\n")
-            sys.stdout.flush()
-
-        elif method == "notifications/initialized":
-            pass
-
-        elif method == "ping":
-            sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {}}) + "\n")
-            sys.stdout.flush()
-
-        elif method == "tools/list":
-            resp = {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {"tools": TOOLS}
-            }
-            sys.stdout.write(json.dumps(resp) + "\n")
-            sys.stdout.flush()
-
-        elif method == "tools/call":
-            tool_name = params.get("name")
-            tool_args = params.get("arguments", {})
-            try:
-                data = handle_call(tool_name, tool_args)
-                text_out = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, indent=2)
-                resp = {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "result": {
-                        "content": [{"type": "text", "text": text_out}]
-                    }
-                }
-            except Exception as e:
-                resp = {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {"code": -32603, "message": str(e)}
-                }
-            sys.stdout.write(json.dumps(resp) + "\n")
-            sys.stdout.flush()
-
-        else:
-            resp = {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32601, "message": f"Method not found: {method}"}
-            }
+            if isinstance(req, list) and req:
+                resp = [r for r in (process_request(item) for item in req) if r is not None]
+            else:
+                resp = process_request(req)
+        except ValueError:
+            resp = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
+        if resp:
             sys.stdout.write(json.dumps(resp) + "\n")
             sys.stdout.flush()
 

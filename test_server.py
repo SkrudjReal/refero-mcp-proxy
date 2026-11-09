@@ -6,12 +6,13 @@ Validates all 14 tools and enforces strict pass/fail status with exit codes.
 
 import sys
 import json
+import tempfile
 from pathlib import Path
 
 # Import local module
 import refero_mcp_server as s
 
-def run_tests():
+def run_tests(test_out: Path):
     print(f"Testing {s.SERVER_NAME} v{s.SERVER_VERSION}...")
     print(f"Total tools registered: {len(s.TOOLS)}")
     
@@ -26,6 +27,7 @@ def run_tests():
             failed.append(name)
             print(f"  [FAIL] {name}{f': {detail}' if detail else ''}")
 
+    res = {}
     # 1. Styles search
     try:
         res = s.refero_search_styles("apple", limit=2)
@@ -89,7 +91,6 @@ def run_tests():
         check("refero_get_image_instructions", False, str(e))
 
     # 8. Download screen test (single)
-    test_out = Path("test_download")
     try:
         res_dl = s.refero_download_screen(screen_id=screen_id, output_dir=str(test_out))
         dl_ok = res_dl.get("total_downloaded") == 1
@@ -103,11 +104,7 @@ def run_tests():
         stitched_file = test_out / f"screen_{screen_id}_stitched.jpg"
         has_stitched = any(f.get("type") == "stitched_image" for f in res_stitch.get("files", []))
         is_on_disk = stitched_file.exists() and stitched_file.stat().st_size > 0
-        check("refero_download_screen (stitch)", has_stitched and is_on_disk, f"Stitched file verified ({round(stitched_file.stat().st_size / 1024, 1)} KB)")
-        if test_out.exists():
-            for f in test_out.glob("*"):
-                f.unlink()
-            test_out.rmdir()
+        check("refero_download_screen (stitch)", has_stitched and is_on_disk, "Stitched file verified" if is_on_disk else "No stitched image")
     except Exception as e:
         check("refero_download_screen (stitch)", False, str(e))
 
@@ -175,4 +172,5 @@ def run_tests():
         sys.exit(0)
 
 if __name__ == "__main__":
-    run_tests()
+    with tempfile.TemporaryDirectory(prefix="refero-smoke-") as test_out:
+        run_tests(Path(test_out))
