@@ -89,18 +89,93 @@ Use the same `mcpServers` JSON structure in `~/.gemini/settings.json` (Windows: 
 
 ---
 
+## Offline Catalogs & Content-Addressable Image Storage (CAS)
+
+The server supports two levels of offline operation:
+1. **Zero-Config Bundled Catalog (`refero_all_links_images.json`)**:
+   - Ships directly with the repository at root.
+   - Contains 242,872 unique direct screenshot URLs across 778 products (463 web sites, 315 iOS apps).
+   - If no SQLite database exists in `data/refero_local.db`, the server automatically activates this catalog as a fallback for `refero_get_catalog`, `refero_search_site`, `refero_search_app`, and screen URL searches.
+2. **Relational SQLite Mirror (`data/refero_local.db`)**:
+   - Built optionally using `mirror_refero.py` or provided via external download.
+   - Indexes comprehensive relational metadata: search tags, UI patterns, color palettes, and individual flow steps.
+
+### Content-Addressable Storage (CAS) Layout
+Images downloaded or mirrored locally are stored deterministically using the SHA-256 hash of their raw CloudFront CDN URL:
+
+$$\text{hash} = \text{SHA-256}(\text{CDN URL})$$
+$$\text{Path} = \texttt{fleet/images/}\{\text{hash}[0:2]\}\texttt{/}\{\text{hash}\}\texttt{.jpg}$$
+
+Example:
+- CDN URL: `https://images.refero.design/screenshots/cursor.com/desktop/a1b2c3d4/0.jpg`
+- SHA-256 Digest: `3f8a91c2e4...`
+- Stored At: `fleet/images/3f/3f8a91c2e4...jpg`
+
+The 256 two-character prefix shards (`00/` through `ff/`) ensure fast filesystem inode lookups and prevent single-directory saturation on filesystems like NTFS, ext4, and APFS.
+
+When `refero_download_screen` or `refero_get_screen_image` is invoked, the proxy computes the hash of the requested screen's CloudFront URL and checks the local CAS directory:
+- If present, the image is immediately copied or referenced from disk with zero network delay.
+- If missing, it falls back to an HTTP download (unless `REFERO_OFFLINE=1` is active).
+
+### Local UX Journey Flows
+Multi-step user flows are stored as standalone JSON files under:
+```
+fleet/flows/{flow_id}.json
+```
+In offline mode, `refero_search_flows` and `refero_get_flow` automatically read from this directory.
+
+---
+
+## Environment Variables
+
+Configure these variables in your shell or AI client MCP configuration:
+
+| Variable | Description |
+| :--- | :--- |
+| `REFERO_OFFLINE` | Set to `1` or `true` to disable all outbound network requests. All tools will rely strictly on local catalogs, SQLite mirrors, and CAS images. |
+| `REFERO_DATA_DIR` | Absolute path to the directory hosting the `fleet/` assets directory and `data/` database. If omitted, the server checks `outputs/refero-full-data/`, `./fleet`, or the repository directory. |
+| `REFERO_TOKEN` | Optional Refero bearer authentication token for private or authenticated API endpoints. |
+
+### Client Configuration with Environment Variables
+
+#### Codex (`config.toml`)
+```toml
+[mcp_servers.refero]
+command = "python"
+args = ["/path/to/refero-mcp-proxy/refero_mcp_server.py"]
+env = { REFERO_OFFLINE = "1", REFERO_DATA_DIR = "/path/to/refero-full-data" }
+```
+
+#### Antigravity / Cursor (`mcp_config.json` / `mcp.json`)
+```json
+{
+  "mcpServers": {
+    "refero": {
+      "command": "python",
+      "args": ["/path/to/refero-mcp-proxy/refero_mcp_server.py"],
+      "env": {
+        "REFERO_OFFLINE": "1",
+        "REFERO_DATA_DIR": "C:/Projects/refero-full-data"
+      }
+    }
+  }
+}
+```
+
+---
+
 ## Full Local Mirror & Autonomous Offline Operation
 
-To operate completely independently of `refero.design` and `styles.refero.design`, use the built-in mirroring orchestrator (`mirror_refero.py`):
+To generate or refresh a full local mirror using the built-in orchestrator (`mirror_refero.py`):
 
 ```bash
-# 1. Mirror catalogs, frontend bundles, and index 3,000+ screens
+# 1. Mirror catalogs, frontend bundles, and index screens
 python mirror_refero.py --catalogs
 
-# 2. Dump all 1,342 design systems & AI prompt specs (DESIGN.md + JSON tokens)
+# 2. Dump all design systems & AI prompt specs (DESIGN.md + JSON tokens)
 python mirror_refero.py --styles --workers 12
 
-# 3. Mirror all 52 AI prompt collections (/ai-agents/...)
+# 3. Mirror all AI prompt collections (/ai-agents/...)
 python mirror_refero.py --collections
 
 # 4. Scrape UX journey flows across all core product patterns
@@ -120,14 +195,7 @@ python mirror_refero.py --download-images --hero-only --workers 10
 python mirror_refero.py --download-images --workers 12
 ```
 
-### Running the MCP Server in 100% Offline Mode
-Set `REFERO_OFFLINE=1` to prohibit network calls. Tools use local catalogs, SQLite and style files; image downloads copy cached media from the mirror. Missing local data produces an error. Image instructions return static text.
-```bash
-REFERO_OFFLINE=1 python refero_mcp_server.py
-```
-
-For Codex, add `env = { REFERO_OFFLINE = "1" }` under `[mcp_servers.refero]`. For Antigravity/Gemini, add `"env": {"REFERO_OFFLINE": "1"}` to the server entry. This works on both operating systems and avoids shell-specific environment syntax.
-In normal mode, tools can use local data or live endpoints. Screen and flow searches fall back to SQLite after a failed live request; this can take the network timeout. Cached screen/style details may be returned before attempting the network.
+---
 
 ---
 
