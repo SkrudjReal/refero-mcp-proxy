@@ -36,7 +36,10 @@ Empirical benchmarks measured on live workloads comparing direct remote API/CDN 
 | **Screenshot Asset Resolution** (`refero_download_screen`) | 52.1 – 124.6 ms | 0.95 – 1.36 ms | **38x – 131x faster** |
 | **Catalog Query & Filtering** (`refero_get_catalog`) | 145.6 ms | 0.15 ms | **970x faster** |
 
-* Benchmarks executed on Windows 11 (Python 3.12, NVMe SSD, 100 Mbps broadband). Local operations eliminate network handshakes, CloudFront round-trips, and rate limits.
+* Benchmarks executed on Windows 11 (Python 3.12, NVMe SSD, 100 Mbps broadband). Local operations eliminate network handshakes, CloudFront round-trips, and rate limits. Run the reproducible test suite locally via:
+```bash
+python benchmark.py
+```
 
 ---
 

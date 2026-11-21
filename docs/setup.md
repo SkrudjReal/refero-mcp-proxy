@@ -143,6 +143,11 @@ Empirical benchmarks comparing remote live API calls against local Content-Addre
 | **Screenshot Asset Resolution** (`refero_download_screen`) | 52.1 – 124.6 ms | 0.95 – 1.36 ms | **38x – 131x faster** |
 | **Catalog Query & Filtering** (`refero_get_catalog`) | 145.6 ms | 0.15 ms | **970x faster** |
 
+To run these comparative benchmarks on your machine:
+```bash
+python benchmark.py
+```
+
 ---
 
 ## Offline Catalogs & Content-Addressable Image Storage (CAS)
