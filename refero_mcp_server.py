@@ -41,41 +41,71 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 DB_PATH = DATA_DIR / "refero_local.db"
 OFFLINE_MODE = os.environ.get("REFERO_OFFLINE", "").strip().lower() in ("1", "true", "yes")
 ALL_LINKS_JSON_PATH = Path(__file__).resolve().parent / "refero_all_links_images.json"
-REFERO_DATA_DIR_ENV = os.environ.get("REFERO_DATA_DIR", "").strip()
+
+
+def _has_dataset_markers(path: Path) -> bool:
+    return path.is_dir() and any(
+        (path / marker).exists() for marker in ("fleet", "styles", "_catalogs")
+    )
+
 
 def get_refero_data_dir() -> Optional[Path]:
-    """Finds local full data directory if available."""
-    default_data_dir = Path(__file__).resolve().parent / "data"
-    if DATA_DIR != default_data_dir and not REFERO_DATA_DIR_ENV:
-        return None
-    candidates = []
-    if REFERO_DATA_DIR_ENV:
-        candidates.append(Path(REFERO_DATA_DIR_ENV))
-    candidates.extend([
-        Path(__file__).resolve().parent.parent.parent / "outputs" / "refero-full-data",
-    ])
+    """Finds local full data directory if available (reads REFERO_DATA_DIR dynamically)."""
+    env_dir = os.environ.get("REFERO_DATA_DIR", "").strip()
+    candidates: List[Path] = []
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    repo_root = Path(__file__).resolve().parent
+    default_data_dir = repo_root / "data"
+
+    # Always check inside DATA_DIR (supports test isolation and default unpack destination)
+    candidates.append(DATA_DIR / "refero-full-data")
+
+    if DATA_DIR == default_data_dir:
+        candidates.extend([
+            repo_root / "outputs" / "refero-full-data",
+            repo_root.parent / "outputs" / "refero-full-data",
+            repo_root.parent.parent / "outputs" / "refero-full-data",
+            repo_root,
+        ])
+
     for c in candidates:
-        if c.exists() and (c / "fleet").exists():
+        if _has_dataset_markers(c):
             return c
     return None
+
 
 ALL_PRODUCTS_CACHE: Optional[List[Dict[str, Any]]] = None
 ALL_PRODUCTS_BY_NAME: Dict[str, Dict[str, Any]] = {}
 ALL_PRODUCTS_BY_ID: Dict[tuple, Dict[str, Any]] = {}
 ALL_LINKS_LOADED = False
+ALL_LINKS_LOADED_PATH: Optional[Path] = None
+LOCAL_FLOWS_INDEX: Optional[List[Dict[str, Any]]] = None
+LOCAL_FLOWS_INDEX_DIR: Optional[Path] = None
+
 
 def load_all_links_catalog() -> List[Dict[str, Any]]:
     """Loads bundled refero_all_links_images.json as instant zero-dependency offline catalog."""
-    global ALL_PRODUCTS_CACHE, ALL_PRODUCTS_BY_NAME, ALL_PRODUCTS_BY_ID, ALL_LINKS_LOADED
+    global ALL_PRODUCTS_CACHE, ALL_PRODUCTS_BY_NAME, ALL_PRODUCTS_BY_ID, ALL_LINKS_LOADED, ALL_LINKS_LOADED_PATH
     catalog_path = DATA_DIR.parent / "refero_all_links_images.json"
-    default_data_dir = Path(__file__).resolve().parent / "data"
-    if DATA_DIR != default_data_dir and not catalog_path.exists():
-        return []
-    if ALL_LINKS_LOADED and ALL_PRODUCTS_CACHE is not None:
+    if not catalog_path.exists():
+        rdir = get_refero_data_dir()
+        if rdir:
+            alt = rdir / "_catalogs" / "refero_all_links_images.json"
+            if alt.exists():
+                catalog_path = alt
+
+    if ALL_LINKS_LOADED and ALL_LINKS_LOADED_PATH == catalog_path and ALL_PRODUCTS_CACHE is not None:
         return ALL_PRODUCTS_CACHE
+
+    ALL_PRODUCTS_BY_NAME = {}
+    ALL_PRODUCTS_BY_ID = {}
+
     if not catalog_path.exists():
         ALL_PRODUCTS_CACHE = []
         ALL_LINKS_LOADED = True
+        ALL_LINKS_LOADED_PATH = catalog_path
         return []
     try:
         with open(catalog_path, "r", encoding="utf-8") as f:
@@ -91,10 +121,12 @@ def load_all_links_catalog() -> List[Dict[str, Any]]:
             if pid is not None:
                 ALL_PRODUCTS_BY_ID[(ptype, str(pid))] = p
         ALL_LINKS_LOADED = True
+        ALL_LINKS_LOADED_PATH = catalog_path
         return ALL_PRODUCTS_CACHE
     except Exception:
         ALL_PRODUCTS_CACHE = []
         ALL_LINKS_LOADED = True
+        ALL_LINKS_LOADED_PATH = catalog_path
         return []
 
 def get_db_conn() -> Optional[sqlite3.Connection]:
@@ -310,27 +342,41 @@ def index_sites_screens():
 # 1. Styles & Design Systems (styles.refero.design)
 # =====================================================================
 
+def _get_style_roots() -> List[Path]:
+    """Returns candidate directories containing local design styles."""
+    roots: List[Path] = []
+    default_styles = DATA_DIR / "styles"
+    roots.append(default_styles)
+    rdir = get_refero_data_dir()
+    if rdir:
+        r_styles = rdir / "styles"
+        if r_styles != default_styles:
+            roots.append(r_styles)
+    return roots
+
+
 def load_styles_catalog(max_pages: int = 5):
-    """Loads styles from local disk index or scrapes styles.refero.design."""
+    """Loads styles from local disk index, dataset mirror styles dir, SQLite, or styles.refero.design."""
     global STYLE_CATALOG_LOADED
     if STYLE_CATALOG_LOADED and len(STYLE_CACHE) > 0:
         return
 
-    # 1. Check local styles master index on disk
-    local_styles_index = DATA_DIR / "styles" / "index.json"
-    if local_styles_index.exists():
-        try:
-            with open(local_styles_index, "r", encoding="utf-8") as f:
-                items = json.load(f)
-                for item in items:
-                    sid = item.get("id")
-                    if sid and sid not in STYLE_CACHE:
-                        STYLE_CACHE[sid] = item
-                if len(STYLE_CACHE) > 0:
-                    STYLE_CATALOG_LOADED = True
-                    return
-        except Exception:
-            pass
+    # 1. Check local styles master index.json on disk
+    for styles_root in _get_style_roots():
+        local_styles_index = styles_root / "index.json"
+        if local_styles_index.exists():
+            try:
+                with open(local_styles_index, "r", encoding="utf-8") as f:
+                    items = json.load(f)
+                    for item in items:
+                        sid = item.get("id")
+                        if sid and sid not in STYLE_CACHE:
+                            STYLE_CACHE[sid] = item
+                    if len(STYLE_CACHE) > 0:
+                        STYLE_CATALOG_LOADED = True
+                        return
+            except Exception:
+                pass
 
     # 2. Check local SQLite styles table
     conn = get_db_conn()
@@ -349,6 +395,31 @@ def load_styles_catalog(max_pages: int = 5):
             pass
         finally:
             conn.close()
+
+    # 3. Scan unpacked style directories (<styles_root>/<uuid>/spec.json)
+    for styles_root in _get_style_roots():
+        if styles_root.is_dir():
+            for entry in styles_root.iterdir():
+                if not entry.is_dir():
+                    continue
+                sid = entry.name
+                if sid in STYLE_CACHE:
+                    continue
+                spec_file = entry / "spec.json"
+                if spec_file.is_file():
+                    try:
+                        with open(spec_file, "r", encoding="utf-8") as f:
+                            spec_data = json.load(f)
+                        meta = spec_data.get("meta") if isinstance(spec_data, dict) else {}
+                        meta = meta if isinstance(meta, dict) else {}
+                        sname = meta.get("siteName") or sid
+                        surl = meta.get("url") or ""
+                        STYLE_CACHE[sid] = {"id": sid, "siteName": sname, "url": surl}
+                    except Exception:
+                        pass
+            if len(STYLE_CACHE) > 0:
+                STYLE_CATALOG_LOADED = True
+                return
 
     if OFFLINE_MODE:
         STYLE_CATALOG_LOADED = True
@@ -408,26 +479,38 @@ def refero_get_style(style_id: Optional[str] = None, style_ids: Optional[List[st
         targets = [style_id]
 
     results = []
+    style_roots = _get_style_roots()
     for sid in targets:
         target_uuid = sid
-        if sid not in STYLE_CACHE:
+
+        # Helper to check local disk DESIGN.md / spec.json across all style roots
+        def _find_local_style(uid: str):
+            for sroot in style_roots:
+                local_spec_dir = sroot / uid
+                if sroot.resolve() not in local_spec_dir.resolve().parents:
+                    raise ValueError("Style ID must stay within the styles directory")
+                local_md_file = local_spec_dir / "DESIGN.md"
+                local_json_file = local_spec_dir / "spec.json"
+                if local_md_file.is_file():
+                    return local_md_file, local_json_file
+            return None, None
+
+        local_md_file, local_json_file = _find_local_style(target_uuid)
+
+        if local_md_file is None and sid not in STYLE_CACHE:
             load_styles_catalog()
             for cuid, info in STYLE_CACHE.items():
                 if info["siteName"].lower() == sid.lower():
                     target_uuid = cuid
                     break
+            if target_uuid != sid:
+                local_md_file, local_json_file = _find_local_style(target_uuid)
 
-        # Check local disk DESIGN.md / spec.json first
-        local_spec_dir = DATA_DIR / "styles" / target_uuid
-        if (DATA_DIR / "styles").resolve() not in local_spec_dir.resolve().parents:
-            raise ValueError("Style ID must stay within the styles directory")
-        local_md_file = local_spec_dir / "DESIGN.md"
-        local_json_file = local_spec_dir / "spec.json"
-        if local_md_file.exists():
+        if local_md_file is not None:
             try:
                 with open(local_md_file, "r", encoding="utf-8") as f:
                     cached_md = f.read()
-                if response_format == "json" and local_json_file.exists():
+                if response_format == "json" and local_json_file is not None and local_json_file.is_file():
                     with open(local_json_file, "r", encoding="utf-8") as f:
                         cached_json = json.load(f)
                     results.append({
@@ -581,25 +664,64 @@ def refero_search_screens(query: str, platform: str = "web", order: str = "trend
     q_lower = query.lower().strip()
     matched_records = []
 
-    # 1. Check in-memory screen cache (from sites_available.json / sites_full.json)
+    # 1. Check in-memory screen cache (from sites_available.json / sites_full.json / apps_available.json)
     for sid, scr in SCREEN_CACHE_BY_ID.items():
-        s_title = (scr.get("title") or "").lower()
+        if platform == "ios" and not scr.get("app"):
+            continue
+        if platform == "web" and scr.get("app") and not scr.get("site"):
+            continue
+        s_title = (scr.get("title") or scr.get("page_title") or "").lower()
         s_domain = (scr.get("domain") or "").lower()
         s_page_url = str(scr.get("page_url") or "").lower()
         s_url = str(scr.get("url") or "").lower()
         site_info = scr.get("site") or scr.get("app") or {}
-        s_name = (site_info.get("name") or "").lower()
+        s_name = (site_info.get("name") or "").lower() if isinstance(site_info, dict) else ""
         if not q_lower or q_lower in s_title or q_lower in s_domain or q_lower in s_page_url or q_lower in s_name or q_lower in s_url:
             matched_records.append(scr)
-            if len(matched_records) >= per_page:
-                break
 
-    # 2. If no screens matched query directly, provide top screens from catalog
-    if not matched_records and SCREEN_CACHE_BY_ID:
-        for sid, scr in list(SCREEN_CACHE_BY_ID.items())[:per_page]:
-            matched_records.append(scr)
+    # 2. If not enough matches, search zero-dependency refero_all_links_images.json
+    offset = (page - 1) * per_page
+    needed = offset + per_page
+    if len(matched_records) < needed:
+        all_p = load_all_links_catalog()
+        if all_p:
+            seen_urls = {r.get("direct_image_url") for r in matched_records if isinstance(r, dict)}
+            for p in all_p:
+                ptype = p.get("type", "")
+                if platform == "ios" and ptype != "ios_app":
+                    continue
+                if platform == "web" and ptype != "web_site":
+                    continue
+                pname = (p.get("name") or "").lower()
+                pdom = (p.get("domain_or_store") or "").lower()
+                cats = [str(c).lower() for c in p.get("categories", [])]
+                has_match = not q_lower or q_lower in pname or q_lower in pdom or any(q_lower in c for c in cats)
+                urls = p.get("image_urls", [])
+                matching_urls = urls if has_match else [u for u in urls if q_lower in u.lower()]
+                if matching_urls:
+                    for idx, u in enumerate(matching_urls):
+                        if u in seen_urls:
+                            continue
+                        seen_urls.add(u)
+                        scr_rec = {
+                            "id": f"{p.get('id', 1000)}_{idx}",
+                            "title": f"{p.get('name')} Screen {idx + 1}",
+                            "url": u,
+                            "platform": platform,
+                        }
+                        if ptype == "ios_app":
+                            scr_rec["app"] = {"name": p.get("name"), "id": p.get("id")}
+                        else:
+                            scr_rec["site"] = {"name": p.get("name"), "domain": p.get("domain_or_store")}
+                            scr_rec["domain"] = p.get("domain_or_store")
+                        matched_records.append(enrich_screen_record(scr_rec))
+                        if len(matched_records) >= needed:
+                            break
+                if len(matched_records) >= needed:
+                    break
 
     if matched_records:
+        page_slice = matched_records[offset:offset + per_page]
         return {
             "source": "local_offline_catalog",
             "query": query,
@@ -607,7 +729,7 @@ def refero_search_screens(query: str, platform: str = "web", order: str = "trend
             "page": page,
             "per_page": per_page,
             "total_records": len(matched_records),
-            "records": matched_records[:per_page]
+            "records": page_slice
         }
 
     return data if isinstance(data, dict) and "records" in data else {"error": "Failed to search screens", "records": []}
@@ -649,6 +771,15 @@ def refero_get_screen(screen_id: Optional[Union[str, int]] = None, screen_ids: O
                 pass
             finally:
                 conn.close()
+
+        # 2b. Check local catalog index (sites_full / sites_available / apps_available)
+        index_sites_screens()
+        if sid in SCREEN_CACHE_BY_UUID:
+            results.append(SCREEN_CACHE_BY_UUID[sid])
+            continue
+        if sid in SCREEN_CACHE_BY_ID:
+            results.append(SCREEN_CACHE_BY_ID[sid])
+            continue
 
         if OFFLINE_MODE:
             results.append({"error": "Screen not found in local offline database", "screen_id": sid})
@@ -763,6 +894,31 @@ def refero_get_similar_screens(screen_id: Union[str, int], limit: int = 10, plat
         finally:
             conn.close()
 
+    # Fallback to indexed local screens cache when SQLite is absent
+    index_sites_screens()
+    if SCREEN_CACHE_BY_ID:
+        same_domain = []
+        others = []
+        for cid, scr in SCREEN_CACHE_BY_ID.items():
+            if str(cid) == str(screen_id) or str(scr.get("uuid")) == str(screen_id):
+                continue
+            s_site = scr.get("site")
+            s_dom = scr.get("domain") or (s_site.get("domain") if isinstance(s_site, dict) else "")
+            if domain and s_dom == domain:
+                same_domain.append(scr)
+            elif len(others) < limit:
+                others.append(scr)
+            if len(same_domain) >= limit:
+                break
+        picked = same_domain[:limit] if same_domain else others[:limit]
+        if picked:
+            return {
+                "source": "local_offline_catalog",
+                "screen_id": screen_id,
+                "count": len(picked),
+                "records": picked
+            }
+
     return {"error": "Failed to fetch similar screens", "screen_id": screen_id}
 
 
@@ -791,6 +947,27 @@ def refero_get_screen_image(screen_id: Union[str, int], image_size: str = "full"
     site_name = site_info.get("name") if isinstance(site_info, dict) else screen.get("domain", f"Screen {screen_id}")
 
     local_files = []
+    seen_local = set()
+
+    # Check Content-Addressable Storage (fleet/images/<sha[:2]>/<sha>.jpg)
+    rdir = get_refero_data_dir()
+    if rdir:
+        for u in img_urls:
+            if not isinstance(u, str):
+                continue
+            sha = hashlib.sha256(u.encode("utf-8")).hexdigest()
+            cas_file = rdir / "fleet" / "images" / sha[:2] / f"{sha}.jpg"
+            if cas_file.is_file() and cas_file.stat().st_size > 0:
+                resolved_str = str(cas_file.resolve())
+                if resolved_str not in seen_local:
+                    seen_local.add(resolved_str)
+                    local_files.append({
+                        "file_path": resolved_str,
+                        "file_size_kb": round(cas_file.stat().st_size / 1024, 2),
+                        "file_uri": cas_file.resolve().as_uri(),
+                        "storage": "cas"
+                    })
+
     uuid_str = screen.get("uuid") or str(screen_id)
     for check_dir in [DATA_DIR / "media", DATA_DIR / "screenshots", Path.cwd() / "screenshots"]:
         if check_dir.exists():
@@ -799,11 +976,14 @@ def refero_get_screen_image(screen_id: Union[str, int], image_size: str = "full"
                 matched = list(check_dir.glob(f"**/*screen_{screen_id}*"))
             for mf in matched:
                 if mf.is_file() and mf.stat().st_size > 1024:
-                    local_files.append({
-                        "file_path": str(mf.resolve()),
-                        "file_size_kb": round(mf.stat().st_size / 1024, 2),
-                        "file_uri": mf.resolve().as_uri()
-                    })
+                    resolved_str = str(mf.resolve())
+                    if resolved_str not in seen_local:
+                        seen_local.add(resolved_str)
+                        local_files.append({
+                            "file_path": resolved_str,
+                            "file_size_kb": round(mf.stat().st_size / 1024, 2),
+                            "file_uri": mf.resolve().as_uri()
+                        })
 
     return {
         "screen_id": screen_id,
@@ -1085,96 +1265,63 @@ def refero_search_flows(query: str, platform: str = "web", page: int = 1) -> Dic
         finally:
             conn.close()
 
-    # Check local fleet/flows files if available
+    # Check local fleet/flows files if available (cached lightweight index)
+    global LOCAL_FLOWS_INDEX, LOCAL_FLOWS_INDEX_DIR
     rdir = get_refero_data_dir()
     if rdir:
         flows_dir = rdir / "fleet" / "flows"
-        if flows_dir.exists():
-            matched_flows = []
+        if flows_dir.is_dir():
+            if LOCAL_FLOWS_INDEX is None or LOCAL_FLOWS_INDEX_DIR != flows_dir:
+                idx_list = []
+                for ff in sorted(flows_dir.glob("*.json")):
+                    try:
+                        with open(ff, "r", encoding="utf-8") as f:
+                            fd = json.load(f)
+                        if not isinstance(fd, dict):
+                            continue
+                        is_ios = bool(fd.get("app")) and not bool(fd.get("site"))
+                        tgt = fd.get("app") or fd.get("site") or {}
+                        tname = (tgt.get("name") or "") if isinstance(tgt, dict) else ""
+                        tdom = (tgt.get("domain") or "") if isinstance(tgt, dict) else ""
+                        idx_list.append({
+                            "path": ff,
+                            "platform": "ios" if is_ios else "web",
+                            "search_text": f"{fd.get('name') or ''} {fd.get('title') or ''} {fd.get('description') or ''} {tname} {tdom}".lower()
+                        })
+                    except Exception:
+                        pass
+                LOCAL_FLOWS_INDEX = idx_list
+                LOCAL_FLOWS_INDEX_DIR = flows_dir
+
             q_lower = query.lower().strip()
-            for ff in flows_dir.glob("*.json"):
+            per_page = 10
+            matched_entries = [
+                entry for entry in LOCAL_FLOWS_INDEX
+                if (not platform or entry["platform"] == platform)
+                and (not q_lower or q_lower in entry["search_text"])
+            ]
+            total_matched = len(matched_entries)
+            start = (page - 1) * per_page
+            page_entries = matched_entries[start:start + per_page]
+            matched_flows = []
+            for entry in page_entries:
                 try:
-                    with open(ff, "r", encoding="utf-8") as f:
+                    with open(entry["path"], "r", encoding="utf-8") as f:
                         fd = json.load(f)
-                    fname = (fd.get("name") or "").lower()
-                    tgt = fd.get("app") or fd.get("site") or {}
-                    tname = (tgt.get("name") or tgt.get("domain") or "").lower()
-                    if not q_lower or q_lower in fname or q_lower in tname:
-                        matched_flows.append(fd)
-                        if len(matched_flows) >= 10:
-                            break
+                    matched_flows.append(fd)
                 except Exception:
                     pass
-            if matched_flows:
+            if total_matched > 0 or OFFLINE_MODE:
                 return {
                     "source": "local_fleet_flows",
                     "query": query,
                     "platform": platform,
                     "page": page,
-                    "total_records": len(matched_flows),
+                    "total_records": total_matched,
                     "records": matched_flows
                 }
 
-    # Fallback: check already indexed screens first
-    index_sites_screens()
-    q_lower = query.lower().strip()
-    matched_records = []
-
-    # 1. Check in-memory screen cache
-    for sid, scr in SCREEN_CACHE_BY_ID.items():
-        s_title = (scr.get("title") or "").lower()
-        s_domain = (scr.get("domain") or "").lower()
-        s_url = str(scr.get("url") or "").lower()
-        site_info = scr.get("site") or scr.get("app") or {}
-        s_name = (site_info.get("name") or "").lower()
-        if not q_lower or q_lower in s_title or q_lower in s_domain or q_lower in s_url or q_lower in s_name:
-            matched_records.append(scr)
-            if len(matched_records) >= per_page:
-                break
-
-    # 2. If not enough, search refero_all_links_images.json
-    if len(matched_records) < per_page:
-        all_p = load_all_links_catalog()
-        if all_p:
-            for p in all_p:
-                ptype = p.get("type", "")
-                if platform == "ios" and ptype != "ios_app":
-                    continue
-                if platform == "web" and ptype != "web_site":
-                    continue
-                pname = (p.get("name") or "").lower()
-                pdom = (p.get("domain_or_store") or "").lower()
-                cats = [c.lower() for c in p.get("categories", [])]
-                # Match product name, domain, category, or URL keyword
-                has_match = not q_lower or q_lower in pname or q_lower in pdom or any(q_lower in c for c in cats)
-                urls = p.get("image_urls", [])
-                matching_urls = [u for u in urls if q_lower in u.lower()] if not has_match else urls
-                if matching_urls:
-                    for idx, u in enumerate(matching_urls[:per_page]):
-                        # Extract integer or stable hash for id
-                        scr_rec = {
-                            "id": f"{p.get('id', 1000)}_{idx}",
-                            "title": f"{p.get('name')} Screen {idx+1}",
-                            "url": u,
-                            "site": {"name": p.get("name"), "domain": p.get("domain_or_store")},
-                            "platform": platform
-                        }
-                        matched_records.append(enrich_screen_record(scr_rec))
-                    if len(matched_records) >= per_page:
-                        break
-
-    if matched_records:
-        return {
-            "source": "local_offline_cache",
-            "query": query,
-            "platform": platform,
-            "page": page,
-            "per_page": per_page,
-            "total_records": len(matched_records),
-            "records": matched_records[:per_page]
-        }
-
-    return data if isinstance(data, dict) and "records" in data else {"error": "Failed to search screens", "records": []}
+    return data if isinstance(data, dict) and "records" in data else {"error": "Failed to search flows", "records": []}
 
 
 def refero_get_flow(flow_id: Optional[Union[int, str]] = None, flow_ids: Optional[List[Union[int, str]]] = None) -> Any:
@@ -1210,8 +1357,9 @@ def refero_get_flow(flow_id: Optional[Union[int, str]] = None, flow_ids: Optiona
         # Check local fleet/flows directory
         rdir = get_refero_data_dir()
         if rdir:
-            flow_file = rdir / "fleet" / "flows" / f"{fid}.json"
-            if flow_file.exists():
+            flows_root = (rdir / "fleet" / "flows").resolve()
+            flow_file = (flows_root / f"{fid}.json").resolve()
+            if flows_root in flow_file.parents and flow_file.is_file():
                 try:
                     with open(flow_file, "r", encoding="utf-8") as f:
                         fd = json.load(f)
@@ -1249,20 +1397,20 @@ def refero_get_flow(flow_id: Optional[Union[int, str]] = None, flow_ids: Optiona
 def refero_search_site(query: str, page: int = 1, per_page: int = 10) -> Dict[str, Any]:
     """Search web sites, domains, and design collections."""
     index_sites_screens()
-    if RAW_SITES_CACHE is None:
-        return {"error": "Sites catalog unavailable locally or from the remote endpoint"}
-    raw = RAW_SITES_CACHE or []
     q_lower = query.lower().strip()
     filtered = []
-    for s in raw:
-        name = (s.get("name") or "").lower()
-        domain = (s.get("domain") or "").lower()
-        desc = (s.get("description") or "").lower()
-        if not q_lower or q_lower in name or q_lower in domain or q_lower in desc:
-            filtered.append(s)
+    if RAW_SITES_CACHE is not None:
+        for s in RAW_SITES_CACHE:
+            name = (s.get("name") or "").lower()
+            domain = (s.get("domain") or "").lower()
+            desc = (s.get("description") or "").lower()
+            if not q_lower or q_lower in name or q_lower in domain or q_lower in desc:
+                filtered.append(s)
 
     if not filtered:
         all_p = load_all_links_catalog()
+        if RAW_SITES_CACHE is None and not all_p:
+            return {"error": "Sites catalog unavailable locally or from the remote endpoint"}
         for p in all_p:
             if p.get("type") == "web_site":
                 name = (p.get("name") or "").lower()
@@ -1315,15 +1463,21 @@ def refero_get_catalog(catalog_type: str = "sites", search: str = "", limit: Opt
     c_lower = catalog_type.lower().strip()
     is_app = "app" in c_lower
 
+    rdir = get_refero_data_dir()
     if is_app:
         if CATALOG_APPS_CACHE is None:
-            local_apps = DATA_DIR / "catalogs" / "apps.json"
-            if local_apps.exists():
-                try:
-                    with open(local_apps, "r", encoding="utf-8") as f:
-                        CATALOG_APPS_CACHE = json.load(f)
-                except Exception:
-                    pass
+            app_candidates = [DATA_DIR / "catalogs" / "apps.json"]
+            if rdir:
+                app_candidates.append(rdir / "_catalogs" / "apps.json")
+            for local_apps in app_candidates:
+                if local_apps.exists():
+                    try:
+                        with open(local_apps, "r", encoding="utf-8") as f:
+                            CATALOG_APPS_CACHE = json.load(f)
+                        if isinstance(CATALOG_APPS_CACHE, list):
+                            break
+                    except Exception:
+                        pass
             if CATALOG_APPS_CACHE is None and not OFFLINE_MODE:
                 CATALOG_APPS_CACHE = http_get(f"{REFERO_WEB_BASE}/json/apps.json", is_json=True)
         if not isinstance(CATALOG_APPS_CACHE, list):
@@ -1347,13 +1501,18 @@ def refero_get_catalog(catalog_type: str = "sites", search: str = "", limit: Opt
         items = CATALOG_APPS_CACHE
     else:
         if CATALOG_SITES_CACHE is None:
-            local_sites = DATA_DIR / "catalogs" / "sites.json"
-            if local_sites.exists():
-                try:
-                    with open(local_sites, "r", encoding="utf-8") as f:
-                        CATALOG_SITES_CACHE = json.load(f)
-                except Exception:
-                    pass
+            site_candidates = [DATA_DIR / "catalogs" / "sites.json"]
+            if rdir:
+                site_candidates.append(rdir / "_catalogs" / "sites.json")
+            for local_sites in site_candidates:
+                if local_sites.exists():
+                    try:
+                        with open(local_sites, "r", encoding="utf-8") as f:
+                            CATALOG_SITES_CACHE = json.load(f)
+                        if isinstance(CATALOG_SITES_CACHE, list):
+                            break
+                    except Exception:
+                        pass
             if CATALOG_SITES_CACHE is None and not OFFLINE_MODE:
                 CATALOG_SITES_CACHE = http_get(f"{REFERO_WEB_BASE}/json/sites.json", is_json=True)
         if not isinstance(CATALOG_SITES_CACHE, list):

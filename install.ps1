@@ -1,19 +1,22 @@
 ﻿<#
 .SYNOPSIS
     Refero MCP Proxy — Automated Installer for Windows
-    Configures Codex, Antigravity, Claude Code, and OpenCode seamlessly.
+    Configures Codex, Antigravity, Claude Code, and OpenCode safely.
 
 .PARAMETER Clients
     One or more AI clients to configure: 'all', 'codex', 'antigravity', 'claude', 'opencode'. Default: 'all'.
 
 .PARAMETER DataDir
-    Path to custom REFERO_DATA_DIR containing mirrored dataset (fleet/images, fleet/flows, styles).
+    Path to custom REFERO_DATA_DIR containing mirrored dataset (also used as --dest when -Unpack is set).
 
 .PARAMETER Offline
     Enforce REFERO_OFFLINE=1 in client configurations for 100% air-gapped operation.
 
 .PARAMETER Unpack
     Extract downloaded refero_*.zip archives into the expected dataset directory.
+
+.PARAMETER UnpackSrc
+    Optional directory containing downloaded refero_*.zip archives (used with -Unpack).
 
 .PARAMETER Remove
     Uninstall/remove refero MCP server from selected clients.
@@ -27,7 +30,8 @@ param(
     [string[]]$Clients = @("all"),
     [string]$DataDir = "",
     [switch]$Offline,
-    [string]$Unpack = "",
+    [switch]$Unpack,
+    [string]$UnpackSrc = "",
     [switch]$Remove,
     [switch]$Status
 )
@@ -37,36 +41,38 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host ""
 Write-Host "==================================================================" -ForegroundColor Cyan
-Write-Host " ✦ Refero MCP Proxy — Automated Client Installer (Windows)" -ForegroundColor Cyan
+Write-Host " Refero MCP Proxy — Automated Client Installer (Windows)" -ForegroundColor Cyan
 Write-Host "==================================================================" -ForegroundColor Cyan
 Write-Host ""
 
-# 1. Detect Python
+# 1. Detect Python (prefer real python.exe over WindowsApps stub)
 $PythonBin = ""
 try {
-    $found = Get-Command "python.exe" -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -notmatch "WindowsApps" }
-    if ($found) {
+    $found = @(Get-Command "python.exe" -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -notmatch "WindowsApps" })
+    if ($found.Count -gt 0) {
         $PythonBin = $found[0].Source
     }
 } catch {}
 
 if (-not $PythonBin) {
-    # Check common LocalAppData paths
-    $Candidates = Get-ChildItem -Path "$env:LOCALAPPDATA\Python\*" -Filter "python.exe" -Recurse -ErrorAction SilentlyContinue
-    if ($Candidates) {
+    $Candidates = @(Get-ChildItem -Path "$env:LOCALAPPDATA\Python\*" -Filter "python.exe" -Recurse -ErrorAction SilentlyContinue)
+    if ($Candidates.Count -gt 0) {
         $PythonBin = $Candidates[0].FullName
     }
 }
 
 if (-not $PythonBin) {
     try {
-        $PythonBin = (Get-Command "python.exe" -ErrorAction SilentlyContinue).Source
+        $fallback = @(Get-Command "python.exe" -CommandType Application -ErrorAction SilentlyContinue)
+        if ($fallback.Count -gt 0) {
+            $PythonBin = $fallback[0].Source
+        }
     } catch {}
 }
 
 if (-not $PythonBin) {
-    Write-Host "❌ Error: python.exe was not found on PATH or common Windows directories." -ForegroundColor Red
-    Write-Host "Please install Python 3.8+ from https://www.python.org or the Microsoft Store." -ForegroundColor Yellow
+    Write-Host "[ERROR] python.exe was not found on PATH or common Windows directories." -ForegroundColor Red
+    Write-Host "Install Python 3.8+ from https://www.python.org." -ForegroundColor Yellow
     exit 1
 }
 
@@ -74,37 +80,51 @@ $PyVer = (& $PythonBin -c "import sys; print(str(sys.version_info[0]) + '.' + st
 Write-Host "Found Python: $PythonBin (v$PyVer)" -ForegroundColor DarkGray
 
 # Check Python >= 3.8
-& $PythonBin -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)'
+& $PythonBin -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "❌ Error: Python 3.8 or higher is required. Found v$PyVer." -ForegroundColor Red
+    Write-Host "[ERROR] Python 3.8 or higher is required. Found v$PyVer." -ForegroundColor Red
     exit 1
 }
 
-# 2. Check & install Pillow (optional for stitching)
-Write-Host ""
-Write-Host "[1/3] Checking optional dependencies..." -ForegroundColor Cyan
-& $PythonBin -c "import PIL" 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "  ✔ Pillow is already installed (image stitching enabled)." -ForegroundColor Green
-} else {
-    Write-Host "  ℹ Pillow not found. Installing Pillow for screenshot stitching..." -ForegroundColor Yellow
-    & $PythonBin -m pip install Pillow --quiet 2>$null
-}
-
-# 3. Handle Status
+# 2. Handle Status early
 if ($Status) {
     & $PythonBin "$ScriptDir\configure_clients.py" --status
-    exit 0
+    exit $LASTEXITCODE
 }
 
-# 4. Handle Unpack
-if ($PSBoundParameters.ContainsKey('Unpack')) {
+# 3. Check & install Pillow (optional for stitching; relax ErrorActionPreference for native stderr)
+Write-Host ""
+Write-Host "[1/3] Checking optional dependencies..." -ForegroundColor Cyan
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $PythonBin -c "import PIL" 2>$null
+$pilExit = $LASTEXITCODE
+if ($pilExit -eq 0) {
+    Write-Host "  [OK] Pillow is already installed (image stitching enabled)." -ForegroundColor Green
+} else {
+    Write-Host "  [INFO] Pillow not found. Installing Pillow for screenshot stitching..." -ForegroundColor Yellow
+    & $PythonBin -m pip install Pillow --quiet 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [WARN] Could not install Pillow automatically; basic operations still work." -ForegroundColor DarkGray
+    }
+}
+$ErrorActionPreference = $prevEAP
+
+# 4. Handle Unpack (also trigger if -UnpackSrc was supplied directly)
+if ($Unpack -or $UnpackSrc) {
     Write-Host ""
     Write-Host "[Unpack] Running Refero dataset extractor..." -ForegroundColor Cyan
-    if ($Unpack -and $Unpack -ne "True") {
-        & $PythonBin "$ScriptDir\unpack_dataset.py" --src "$Unpack"
-    } else {
-        & $PythonBin "$ScriptDir\unpack_dataset.py"
+    $UnpackArgs = @("$ScriptDir\unpack_dataset.py")
+    if ($UnpackSrc) {
+        $UnpackArgs += @("--src", "$UnpackSrc")
+    }
+    if ($DataDir) {
+        $UnpackArgs += @("--dest", "$DataDir")
+    }
+    & $PythonBin $UnpackArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[ERROR] Dataset unpacking failed (exit code $LASTEXITCODE)." -ForegroundColor Red
+        exit $LASTEXITCODE
     }
 }
 
@@ -140,6 +160,10 @@ if ($Remove) {
 Write-Host ""
 Write-Host "[2/3] Configuring AI Coding Clients..." -ForegroundColor Cyan
 & $PythonBin $ConfigArgs
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[ERROR] Client configuration failed (exit code $LASTEXITCODE)." -ForegroundColor Red
+    exit $LASTEXITCODE
+}
 
 # 7. Final status verification
 Write-Host ""
@@ -148,7 +172,7 @@ Write-Host "[3/3] Installation Verification:" -ForegroundColor Cyan
 
 Write-Host ""
 Write-Host "==================================================================" -ForegroundColor Green
-Write-Host " ✦ Installation Complete!" -ForegroundColor Green
+Write-Host " Installation Complete!" -ForegroundColor Green
 Write-Host " Restart or reload your AI assistant (Codex, Antigravity, Claude, OpenCode)." -ForegroundColor Green
 Write-Host "==================================================================" -ForegroundColor Green
 Write-Host ""

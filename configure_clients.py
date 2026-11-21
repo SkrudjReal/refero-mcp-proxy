@@ -4,23 +4,41 @@ Cross-platform MCP Client Configuration Helper for Refero MCP Proxy.
 Configures Codex, Antigravity, Claude Code, and OpenCode safely without overwriting other servers.
 """
 
-import os
-import sys
+import argparse
 import json
 import re
-import argparse
+import shutil
+import sys
 from pathlib import Path
+
+VALID_CLIENTS = ("all", "codex", "antigravity", "claude", "opencode")
+
 
 def get_home_dir() -> Path:
     return Path.home()
 
+
 def get_python_exec(custom_py: str = None) -> str:
     if custom_py:
-        return custom_py
+        resolved = shutil.which(custom_py)
+        return resolved if resolved else custom_py
     return sys.executable
+
 
 def resolve_server_path() -> Path:
     return (Path(__file__).resolve().parent / "refero_mcp_server.py").resolve()
+
+
+def _write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
+def _escape_toml_string(val: str) -> str:
+    return val.replace("\\", "\\\\").replace('"', '\\"')
+
 
 # =====================================================================
 # 1. Antigravity Configuration (~/.gemini/config/mcp_config.json)
@@ -28,16 +46,16 @@ def resolve_server_path() -> Path:
 def configure_antigravity(server_path: Path, py_exec: str, data_dir: str = None, offline: bool = False, remove: bool = False):
     config_path = get_home_dir() / ".gemini" / "config" / "mcp_config.json"
     print(f"\n[Antigravity] Target config: {config_path}")
-    
+
     config = {"mcpServers": {}}
     if config_path.exists():
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
         except Exception as e:
-            print(f"  ⚠️ Warning reading existing config: {e}. Backing up...")
+            print(f"  [WARN] Error reading existing config: {e}. Backing up...")
             backup_p = config_path.with_suffix(".json.bak")
-            config_path.rename(backup_p)
+            shutil.copy2(config_path, backup_p)
             config = {"mcpServers": {}}
 
     if "mcpServers" not in config or not isinstance(config["mcpServers"], dict):
@@ -63,10 +81,9 @@ def configure_antigravity(server_path: Path, py_exec: str, data_dir: str = None,
         config["mcpServers"]["refero"] = entry
         print("  Added/Updated 'refero' server entry.")
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-    print("  ✅ Saved Antigravity configuration.")
+    _write_json(config_path, config)
+    print("  [OK] Saved Antigravity configuration.")
+
 
 # =====================================================================
 # 2. Claude Code Configuration (~/.claude.json)
@@ -74,16 +91,16 @@ def configure_antigravity(server_path: Path, py_exec: str, data_dir: str = None,
 def configure_claude(server_path: Path, py_exec: str, data_dir: str = None, offline: bool = False, remove: bool = False):
     config_path = get_home_dir() / ".claude.json"
     print(f"\n[Claude Code] Target config: {config_path}")
-    
+
     config = {}
     if config_path.exists():
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
         except Exception as e:
-            print(f"  ⚠️ Warning reading existing config: {e}. Backing up...")
+            print(f"  [WARN] Error reading existing config: {e}. Backing up...")
             backup_p = config_path.with_suffix(".json.bak")
-            config_path.rename(backup_p)
+            shutil.copy2(config_path, backup_p)
             config = {}
 
     if "mcpServers" not in config or not isinstance(config["mcpServers"], dict):
@@ -109,9 +126,9 @@ def configure_claude(server_path: Path, py_exec: str, data_dir: str = None, offl
         config["mcpServers"]["refero"] = entry
         print("  Added/Updated 'refero' server entry.")
 
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-    print("  ✅ Saved Claude Code configuration.")
+    _write_json(config_path, config)
+    print("  [OK] Saved Claude Code configuration.")
+
 
 # =====================================================================
 # 3. OpenCode Configuration (~/.config/opencode/opencode.json)
@@ -119,7 +136,7 @@ def configure_claude(server_path: Path, py_exec: str, data_dir: str = None, offl
 def configure_opencode(server_path: Path, py_exec: str, data_dir: str = None, offline: bool = False, remove: bool = False):
     config_path = get_home_dir() / ".config" / "opencode" / "opencode.json"
     print(f"\n[OpenCode] Target config: {config_path}")
-    
+
     config = {
         "$schema": "https://opencode.ai/config.json",
         "mcp": {}
@@ -128,7 +145,10 @@ def configure_opencode(server_path: Path, py_exec: str, data_dir: str = None, of
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
-        except Exception:
+        except Exception as e:
+            print(f"  [WARN] Error reading existing config: {e}. Backing up...")
+            backup_p = config_path.with_suffix(".json.bak")
+            shutil.copy2(config_path, backup_p)
             config = {"$schema": "https://opencode.ai/config.json", "mcp": {}}
 
     if "mcp" not in config or not isinstance(config["mcp"], dict):
@@ -144,21 +164,21 @@ def configure_opencode(server_path: Path, py_exec: str, data_dir: str = None, of
             "command": [py_exec, str(server_path)],
             "enabled": True
         }
-        env = {}
+        # OpenCode schema uses "environment" (not "env") for local MCP subprocesses
+        environment = {}
         if data_dir:
-            env["REFERO_DATA_DIR"] = data_dir
+            environment["REFERO_DATA_DIR"] = data_dir
         if offline:
-            env["REFERO_OFFLINE"] = "1"
-        if env:
-            entry["env"] = env
+            environment["REFERO_OFFLINE"] = "1"
+        if environment:
+            entry["environment"] = environment
 
         config["mcp"]["refero"] = entry
         print("  Added/Updated 'refero' server entry.")
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-    print("  ✅ Saved OpenCode configuration.")
+    _write_json(config_path, config)
+    print("  [OK] Saved OpenCode configuration.")
+
 
 # =====================================================================
 # 4. Codex Configuration (~/.codex/config.toml)
@@ -171,14 +191,16 @@ def configure_codex(server_path: Path, py_exec: str, data_dir: str = None, offli
     if config_path.exists():
         content = config_path.read_text(encoding="utf-8", errors="ignore")
 
-    # Regular expression to locate [mcp_servers.refero] block
+    # Match [mcp_servers.refero] and any [mcp_servers.refero.*] subtables
+    subtable_pattern = re.compile(
+        r'(?m)^\[mcp_servers\.refero\.[^\]]+\][\s\S]*?(?=^\[|\Z)'
+    )
     section_pattern = re.compile(
-        r'(\[mcp_servers\.refero\][\s\S]*?)(?=\n\[|\Z)',
-        re.MULTILINE
+        r'(?m)^\[mcp_servers\.refero\][\s\S]*?(?=^\[|\Z)'
     )
 
-    clean_server_path = str(server_path).replace("\\", "\\\\") if sys.platform == "win32" else str(server_path)
-    clean_py = str(py_exec).replace("\\", "\\\\") if sys.platform == "win32" else str(py_exec)
+    clean_server_path = _escape_toml_string(str(server_path))
+    clean_py = _escape_toml_string(str(py_exec))
 
     new_block = (
         f"[mcp_servers.refero]\n"
@@ -187,12 +209,15 @@ def configure_codex(server_path: Path, py_exec: str, data_dir: str = None, offli
     )
     env_entries = []
     if data_dir:
-        clean_data_dir = str(data_dir).replace("\\", "\\\\") if sys.platform == "win32" else str(data_dir)
+        clean_data_dir = _escape_toml_string(str(data_dir))
         env_entries.append(f'REFERO_DATA_DIR = "{clean_data_dir}"')
     if offline:
         env_entries.append('REFERO_OFFLINE = "1"')
     if env_entries:
         new_block += f'env = {{ {", ".join(env_entries)} }}\n'
+
+    # Strip any legacy [mcp_servers.refero.env] subtables first
+    content = subtable_pattern.sub("", content)
 
     if remove:
         if section_pattern.search(content):
@@ -200,7 +225,8 @@ def configure_codex(server_path: Path, py_exec: str, data_dir: str = None, offli
             print("  Removed 'refero' from Codex config.toml.")
     else:
         if section_pattern.search(content):
-            content = section_pattern.sub(new_block.strip(), content)
+            # Use lambda so re.sub never interprets backslashes in Windows paths
+            content = section_pattern.sub(lambda _: new_block + "\n", content, count=1)
             print("  Updated existing [mcp_servers.refero] section.")
         else:
             if content and not content.endswith("\n\n"):
@@ -209,17 +235,18 @@ def configure_codex(server_path: Path, py_exec: str, data_dir: str = None, offli
             print("  Appended [mcp_servers.refero] section.")
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(content, encoding="utf-8")
-    print("  ✅ Saved Codex configuration.")
+    config_path.write_text(content.rstrip() + "\n", encoding="utf-8")
+    print("  [OK] Saved Codex configuration.")
+
 
 # =====================================================================
 # Status Inspector
 # =====================================================================
 def print_status():
     print("=" * 65)
-    print(" ✦ Refero MCP Client Installation Status")
+    print(" Refero MCP Client Installation Status")
     print("=" * 65)
-    
+
     # 1. Antigravity
     ag_p = get_home_dir() / ".gemini" / "config" / "mcp_config.json"
     ag_ok = False
@@ -230,15 +257,15 @@ def print_status():
                 ag_ok = "refero" in d.get("mcpServers", {})
         except Exception:
             pass
-    print(f"  Antigravity: {'✅ Configured' if ag_ok else '❌ Not configured'} ({ag_p})")
+    print(f"  Antigravity: {'[OK] Configured' if ag_ok else '[--] Not configured'} ({ag_p})")
 
     # 2. Codex
     codex_p = get_home_dir() / ".codex" / "config.toml"
     codex_ok = False
     if codex_p.exists():
         c = codex_p.read_text(encoding="utf-8", errors="ignore")
-        codex_ok = "[mcp_servers.refero]" in c
-    print(f"  Codex:       {'✅ Configured' if codex_ok else '❌ Not configured'} ({codex_p})")
+        codex_ok = bool(re.search(r'(?m)^\[mcp_servers\.refero\]', c))
+    print(f"  Codex:       {'[OK] Configured' if codex_ok else '[--] Not configured'} ({codex_p})")
 
     # 3. Claude Code
     claude_p = get_home_dir() / ".claude.json"
@@ -250,7 +277,7 @@ def print_status():
                 claude_ok = "refero" in d.get("mcpServers", {})
         except Exception:
             pass
-    print(f"  Claude Code: {'✅ Configured' if claude_ok else '❌ Not configured'} ({claude_p})")
+    print(f"  Claude Code: {'[OK] Configured' if claude_ok else '[--] Not configured'} ({claude_p})")
 
     # 4. OpenCode
     oc_p = get_home_dir() / ".config" / "opencode" / "opencode.json"
@@ -262,8 +289,9 @@ def print_status():
                 oc_ok = "refero" in d.get("mcp", {}) or "refero" in d.get("mcpServers", {})
         except Exception:
             pass
-    print(f"  OpenCode:    {'✅ Configured' if oc_ok else '❌ Not configured'} ({oc_p})")
+    print(f"  OpenCode:    {'[OK] Configured' if oc_ok else '[--] Not configured'} ({oc_p})")
     print("=" * 65)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Configure Refero MCP Proxy across AI coding assistants.")
@@ -280,30 +308,35 @@ def main():
         print_status()
         return
 
-    # Expand any comma-separated client values
+    # Expand and validate any comma-separated client values
     expanded_clients = []
     for c in args.clients:
         for sub in c.split(","):
             s = sub.strip().lower()
             if s:
+                if s not in VALID_CLIENTS:
+                    print(f"[ERROR] Unknown client '{s}'. Valid choices: {', '.join(VALID_CLIENTS)}", file=sys.stderr)
+                    sys.exit(1)
                 expanded_clients.append(s)
+
+    if not expanded_clients:
+        expanded_clients = ["all"]
     args.clients = expanded_clients
 
     server_p = resolve_server_path()
     py_exec = get_python_exec(args.python)
-
     target_all = "all" in args.clients
 
     print("=" * 65)
     action_label = "Removing" if args.remove else "Configuring"
-    print(f" ✦ Refero MCP Proxy — {action_label} Client Configurations")
+    print(f" Refero MCP Proxy — {action_label} Client Configurations")
     print("=" * 65)
     print(f"Server script: {server_p}")
     print(f"Python binary: {py_exec}")
     if args.data_dir:
         print(f"Dataset path:  {args.data_dir}")
     if args.offline:
-        print(f"Offline mode:  Enforced (REFERO_OFFLINE=1)")
+        print("Offline mode:  Enforced (REFERO_OFFLINE=1)")
     print("=" * 65)
 
     if target_all or "antigravity" in args.clients:
@@ -319,9 +352,10 @@ def main():
         configure_opencode(server_p, py_exec, args.data_dir, args.offline, args.remove)
 
     print("\n" + "=" * 65)
-    print("🎉 All requested clients successfully updated!")
-    print("Please restart or reload MCP servers in your editor/CLI client.")
+    print("All requested clients successfully updated.")
+    print("Restart or reload MCP servers in your editor/CLI client.")
     print("=" * 65)
+
 
 if __name__ == "__main__":
     main()

@@ -26,45 +26,40 @@ It operates via standard I/O (JSON-RPC 2.0 stdio) and features a **dual-engine a
 
 ## ✧ Performance Benchmarks: Local Mirror vs. Remote API
 
-Empirical benchmarks measured on live production workloads comparing direct upstream Refero REST API/CDN calls against local Content-Addressable Storage (CAS) and offline JSON catalogs:
+Empirical benchmarks measured with `python benchmark.py` (every check asserts a valid, non-error payload and byte-identical asset resolution):
 
-| Operation | Remote Live API | Local Mirror (CAS / JSON) | Acceleration |
+| Operation | Remote Live API | Local Mirror | Acceleration |
 | :--- | :--- | :--- | :--- |
-| **Product / Site Search** (`refero_search_site`) | 151.6 ms | 0.20 ms | **742x faster** |
-| **UX Journey Flow Retrieval** (`refero_get_flow`) | 450.2 ms | 0.37 ms | **1,229x faster** |
-| **Design System Spec Parsing** (`refero_get_style`) | 4,399.1 ms | 1.17 ms | **3,775x faster** |
-| **Screenshot Asset Resolution** (`refero_download_screen`) | 52.1 – 124.6 ms | 0.95 – 1.36 ms | **38x – 131x faster** |
-| **Catalog Query & Filtering** (`refero_get_catalog`) | 145.6 ms | 0.15 ms | **970x faster** |
+| **Product / Site Search** (`refero_search_site`) | 6,596.2 ms | 0.17 ms warm (224.6 ms cold) | **39,832x faster (warm) / 29x (cold)** |
+| **UX Journey Flow Retrieval** (`refero_get_flow`) | 398.0 ms | 2.42 ms | **164x faster** |
+| **Design System Spec Parsing** (`refero_get_style`) | 4,120.9 ms | 3.78 ms | **1,090x faster** |
+| **Screenshot Asset Resolution** (`download_file` CAS) | 95.5 ms | 5.35 ms | **18x faster** |
+| **Catalog Load** (`refero_get_catalog`) | 312.4 ms | 2.75 ms | **113x faster** |
 
 ### Live Benchmark Run Output
 ```text
 $ python benchmark.py
-============================================================
- ✦ Refero MCP Proxy: Remote vs Local Mirror Benchmarks
-============================================================
+====================================================================
+ Refero MCP Proxy: Remote Live API vs Local Mirror Benchmarks
+====================================================================
 
-[1/5] Benchmarking Product Search (`refero_search_site 'linear'`)...
-      Remote: 146.2 ms | Local: 0.32 ms (455x faster)
+[1/5] Product / Site Search (`refero_search_site('linear')`)...
+      Remote: 6596.2 ms | Local: 0.17 ms warm (224.6 ms cold) -> 39832x faster
 
-[2/5] Benchmarking UX Journey Flow (`refero_get_flow 10006`)...
-      Remote: 506.3 ms | Local: 2.22 ms (228x faster)
+[2/5] UX Journey Flow Retrieval (`refero_get_flow(10006)`)...
+      Remote: 398.0 ms | Local: 2.42 ms (29 steps) -> 164x faster
 
-[3/5] Benchmarking Design System (`refero_get_style Apple`)...
-      Remote: 4016.6 ms | Local: 2.10 ms (1910x faster)
+[3/5] Design System Spec (`refero_get_style` Apple)...
+      Remote: 4120.9 ms | Local: 3.78 ms (11949 chars) -> 1090x faster
 
-[4/5] Benchmarking Screenshot Resolution (CloudFront CDN vs Local CAS)...
-      Remote: 98.6 ms | Local: 4.92 ms (20x faster)
+[4/5] Screenshot Asset Resolution (`download_file` CDN vs CAS)...
+      Remote: 95.5 ms | Local: 5.35 ms (196.7 KB) -> 18x faster
 
-[5/5] Benchmarking Catalog Query (`refero_get_catalog 'sites'`)...
-      Remote: 225.8 ms | Local: 0.15 ms (970x faster)
-
-================================================================================
-✦ ALL CHECKS COMPLETED: Local offline operations eliminate network latency,
-  CloudFront round-trips, rate-limits, and paywall restrictions.
-================================================================================
+[5/5] Catalog Query (`refero_get_catalog('sites')`)...
+      Remote: 312.4 ms | Local: 2.75 ms (438 sites) -> 113x faster
 ```
 
-* Benchmarks executed on Windows 11 (Python 3.12, NVMe SSD, 100 Mbps broadband). Anyone cloning the repository can reproduce the benchmark in real time:
+* Benchmarks executed on Windows 11 (Python 3.12, NVMe SSD). Anyone cloning the repository can reproduce the verified benchmark suite locally:
 ```bash
 python benchmark.py
 ```
@@ -220,11 +215,8 @@ chmod +x install.sh
 
 #### Installer Options & Flags
 Both `install.sh` and `install.ps1` support flexible arguments:
-* `--clients codex,antigravity,claude,opencode` — Configure specific clients (default: `all`).
-* `--unpack [path]` — Automatically unpack downloaded Google Drive archives.
-* `--data-dir /path/to/dataset` — Set custom `REFERO_DATA_DIR` across all client configs.
-* `--offline` — Enforce 100% offline air-gapped mode (`REFERO_OFFLINE=1`).
-* `--status` — Inspect current configuration status without modifying files.
+* Linux/macOS (`install.sh`): `--clients codex,antigravity,claude,opencode`, `--unpack [dir]`, `--data-dir <path>`, `--offline`, `--remove`, `--status`.
+* Windows (`install.ps1`): `-Clients codex,antigravity,claude,opencode`, `-Unpack`, `-UnpackSrc <dir>`, `-DataDir <path>`, `-Offline`, `-Remove`, `-Status`.
 
 ---
 
@@ -234,8 +226,11 @@ If you downloaded the dataset archives from [Google Drive](https://drive.google.
 
 ```bash
 python unpack_dataset.py
+# Or directly through the installer:
+./install.sh --unpack ~/Downloads
+.\install.ps1 -Unpack -UnpackSrc "$HOME\Downloads"
 ```
-*(By default, scans `Downloads/` or current directory for `refero_*.zip` and safely extracts into `outputs/refero-full-data/`).*
+*(By default, scans `Downloads/` or current directory for `refero_*.zip` and safely extracts into `outputs/refero-full-data/` or `data/refero-full-data/` — both are auto-detected by `refero_mcp_server.py`).*
 
 ---
 

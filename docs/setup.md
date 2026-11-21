@@ -172,15 +172,15 @@ export REFERO_DATA_DIR="/path/to/extracted/refero-full-data"
 
 ## Performance Benchmarks: Local Mirror vs. Remote API
 
-Empirical benchmarks comparing remote live API calls against local Content-Addressable Storage and cached JSON indices:
+Empirical benchmarks measured with `python benchmark.py` (every check verifies a valid, non-error payload):
 
-| Operation | Remote Live API | Local Mirror (CAS / JSON) | Acceleration |
+| Operation | Remote Live API | Local Mirror | Acceleration |
 | :--- | :--- | :--- | :--- |
-| **Product / Site Search** (`refero_search_site`) | 151.6 ms | 0.20 ms | **742x faster** |
-| **UX Journey Flow Retrieval** (`refero_get_flow`) | 450.2 ms | 0.37 ms | **1,229x faster** |
-| **Design System Spec Parsing** (`refero_get_style`) | 4,399.1 ms | 1.17 ms | **3,775x faster** |
-| **Screenshot Asset Resolution** (`refero_download_screen`) | 52.1 – 124.6 ms | 0.95 – 1.36 ms | **38x – 131x faster** |
-| **Catalog Query & Filtering** (`refero_get_catalog`) | 145.6 ms | 0.15 ms | **970x faster** |
+| **Product / Site Search** (`refero_search_site`) | 6,596.2 ms | 0.17 ms warm (224.6 ms cold) | **39,832x faster (warm) / 29x (cold)** |
+| **UX Journey Flow Retrieval** (`refero_get_flow`) | 398.0 ms | 2.42 ms | **164x faster** |
+| **Design System Spec Parsing** (`refero_get_style`) | 4,120.9 ms | 3.78 ms | **1,090x faster** |
+| **Screenshot Asset Resolution** (`download_file` CAS) | 95.5 ms | 5.35 ms | **18x faster** |
+| **Catalog Load** (`refero_get_catalog`) | 312.4 ms | 2.75 ms | **113x faster** |
 
 To run these comparative benchmarks on your machine:
 ```bash

@@ -26,10 +26,14 @@ class ServerTests(unittest.TestCase):
             s, DATA_DIR=self.data, DB_PATH=self.data / "refero_local.db", OFFLINE_MODE=True,
             STYLE_CACHE={}, STYLE_CATALOG_LOADED=False, CATALOG_APPS_CACHE=None,
             CATALOG_SITES_CACHE=None, SCREEN_CACHE_BY_ID={}, SCREEN_CACHE_BY_UUID={},
-            RAW_SITES_CACHE=None,
+            RAW_SITES_CACHE=None, ALL_PRODUCTS_CACHE=None, ALL_LINKS_LOADED=False,
+            ALL_LINKS_LOADED_PATH=None, LOCAL_FLOWS_INDEX=None, LOCAL_FLOWS_INDEX_DIR=None,
         )
         state.start()
         self.addCleanup(state.stop)
+        env_patch = patch.dict(os.environ, {"REFERO_DATA_DIR": ""}, clear=False)
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
         network = patch.object(s.urllib.request, "urlopen", side_effect=AssertionError("Unexpected network call"))
         self.network = network.start()
         self.addCleanup(network.stop)
@@ -233,6 +237,138 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(result.exception.code, 0)
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
         self.network.assert_not_called()
+
+    def test_zero_config_all_links_json_fallback(self):
+        bundle = {
+            "products": [
+                {
+                    "id": 101, "type": "web_site", "name": "Linear",
+                    "domain_or_store": "linear.app", "categories": ["Productivity"],
+                    "icon_url": "https://images.refero.design/icon.png", "total_images": 2,
+                    "image_urls": [
+                        "https://images.refero.design/screenshots/linear.app/desktop/aaaaaaaa-0000-0000-0000-000000000001/0.jpg",
+                        "https://images.refero.design/screenshots/linear.app/desktop/aaaaaaaa-0000-0000-0000-000000000002/0.jpg",
+                    ],
+                },
+                {
+                    "id": 202, "type": "ios_app", "name": "Notion",
+                    "domain_or_store": "apps.apple.com/notion", "categories": ["Notes"],
+                    "icon_url": "https://images.refero.design/icon2.png", "total_images": 1,
+                    "image_urls": [
+                        "https://images.refero.design/app_screenshots/202/bbbbbbbb-0000-0000-0000-000000000001/0.jpg",
+                    ],
+                },
+            ]
+        }
+        (self.root / "refero_all_links_images.json").write_text(json.dumps(bundle), encoding="utf-8")
+
+        site_res = s.refero_search_site("linear")
+        self.assertNotIn("error", site_res)
+        self.assertEqual(site_res["total_count"], 1)
+        self.assertEqual(site_res["records"][0]["name"], "Linear")
+
+        cat_res = s.refero_get_catalog("apps", search="notion")
+        self.assertNotIn("error", cat_res)
+        self.assertEqual(cat_res["total_in_catalog"], 1)
+
+        scr_res = s.refero_search_screens("linear", platform="web", per_page=5)
+        self.assertNotIn("error", scr_res)
+        self.assertEqual(len(scr_res["records"]), 2)
+
+        # Flows must NOT crash with NameError when fleet/flows is absent
+        flow_res = s.refero_search_flows("onboarding", platform="web")
+        self.assertIn("error", flow_res)
+        self.network.assert_not_called()
+
+    def test_refero_data_dir_cas_flows_and_styles(self):
+        import hashlib
+        rdir = self.root / "mirror"
+        # Styles without index.json
+        st_dir = rdir / "styles" / "style-uuid-1"
+        st_dir.mkdir(parents=True)
+        (st_dir / "DESIGN.md").write_text("# DESIGN SPEC: Stripe\n## Overview\nClean", encoding="utf-8")
+        (st_dir / "spec.json").write_text(json.dumps({"meta": {"siteName": "Stripe", "url": "https://stripe.com"}, "designSystem": {}}), encoding="utf-8")
+
+        # Fleet flows (one web, one ios)
+        fl_dir = rdir / "fleet" / "flows"
+        fl_dir.mkdir(parents=True)
+        (fl_dir / "10.json").write_text(json.dumps({"id": 10, "name": "Checkout Flow", "site": {"name": "Stripe", "domain": "stripe.com"}, "screenshots": []}), encoding="utf-8")
+        (fl_dir / "11.json").write_text(json.dumps({"id": 11, "name": "Checkout Mobile", "app": {"name": "Revolut"}, "screenshots": []}), encoding="utf-8")
+
+        # Fleet CAS image + _catalogs/sites_available.json
+        img_url = "https://images.refero.design/screenshots/stripe.com/desktop/cccccccc-0000-0000-0000-000000000001/0.jpg"
+        sha = hashlib.sha256(img_url.encode("utf-8")).hexdigest()
+        cas_img = rdir / "fleet" / "images" / sha[:2] / f"{sha}.jpg"
+        cas_img.parent.mkdir(parents=True)
+        cas_img.write_bytes(b"cas-image-bytes" * 100)
+
+        cat_dir = rdir / "_catalogs"
+        cat_dir.mkdir(parents=True)
+        (cat_dir / "sites_available.json").write_text(json.dumps([
+            {"name": "Stripe", "domain": "stripe.com", "screenshots": [
+                {"id": 999, "uuid": "cccccccc-0000-0000-0000-000000000001", "url": [img_url], "page_title": "Checkout"}
+            ]}
+        ]), encoding="utf-8")
+
+        with patch.dict(os.environ, {"REFERO_DATA_DIR": str(rdir)}):
+            # Styles search + get without index.json
+            st_search = s.refero_search_styles("stripe")
+            self.assertEqual(st_search["count"], 1)
+            st_md = s.refero_get_style("style-uuid-1", response_format="md")
+            self.assertIn("DESIGN SPEC: Stripe", st_md)
+
+            # Flows search respects platform filter
+            web_flows = s.refero_search_flows("checkout", platform="web")
+            self.assertEqual(web_flows["total_records"], 1)
+            self.assertEqual(web_flows["records"][0]["id"], 10)
+            ios_flows = s.refero_search_flows("checkout", platform="ios")
+            self.assertEqual(ios_flows["total_records"], 1)
+            self.assertEqual(ios_flows["records"][0]["id"], 11)
+
+            # Screen cold offline lookup + CAS image detection + CAS download
+            scr = s.refero_get_screen(999)
+            self.assertEqual(scr["id"], 999)
+            img_info = s.refero_get_screen_image(999)
+            self.assertTrue(img_info["is_locally_cached"])
+            self.assertEqual(img_info["local_files"][0]["storage"], "cas")
+            dl = s.refero_download_screen(999, output_dir=str(self.root / "cas_out"))
+            self.assertEqual(dl["total_downloaded"], 1)
+            self.assertEqual((self.root / "cas_out" / "screen_999.jpg").read_bytes(), b"cas-image-bytes" * 100)
+
+        self.network.assert_not_called()
+
+    def test_configure_clients_idempotent_toml_and_opencode_schema(self):
+        import configure_clients as cc
+        fake_home = self.root / "home"
+        fake_home.mkdir()
+        srv = Path(r"C:\Projects\refero-mcp-proxy\refero_mcp_server.py")
+        py = r"C:\Python312\python.exe"
+        ddir = r"D:\Datasets\refero-full-data"
+
+        with patch.object(cc, "get_home_dir", return_value=fake_home):
+            # Run Codex configuration TWICE to verify re.sub does not corrupt backslashes
+            cc.configure_codex(srv, py, data_dir=ddir, offline=True)
+            cc.configure_codex(srv, py, data_dir=ddir, offline=True)
+            toml_text = (fake_home / ".codex" / "config.toml").read_text(encoding="utf-8")
+            self.assertIn(r'command = "C:\\Python312\\python.exe"', toml_text)
+            self.assertIn(r'REFERO_DATA_DIR = "D:\\Datasets\\refero-full-data"', toml_text)
+            self.assertEqual(toml_text.count("[mcp_servers.refero]"), 1)
+
+            # Verify OpenCode uses "environment" (not "env")
+            cc.configure_opencode(srv, py, data_dir=ddir, offline=True)
+            oc_cfg = json.loads((fake_home / ".config" / "opencode" / "opencode.json").read_text(encoding="utf-8"))
+            self.assertIn("environment", oc_cfg["mcp"]["refero"])
+            self.assertNotIn("env", oc_cfg["mcp"]["refero"])
+            self.assertEqual(oc_cfg["mcp"]["refero"]["environment"]["REFERO_OFFLINE"], "1")
+
+    def test_unpack_dataset_blocks_zip_slip(self):
+        import zipfile
+        import unpack_dataset as ud
+        bad_zip = self.root / "bad.zip"
+        with zipfile.ZipFile(bad_zip, "w") as zf:
+            zf.writestr("../escape.txt", "boom")
+        with self.assertRaises(ValueError):
+            ud.extract_archive(bad_zip, self.root / "dest")
 
 
 if __name__ == "__main__":

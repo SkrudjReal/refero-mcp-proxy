@@ -33,8 +33,9 @@ AUTH_TOKEN = os.environ.get("REFERO_TOKEN", "").strip()
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    "Authorization": f"Bearer {AUTH_TOKEN}"
 }
+if AUTH_TOKEN:
+    HEADERS["Authorization"] = f"Bearer {AUTH_TOKEN}" if not AUTH_TOKEN.startswith("Bearer ") else AUTH_TOKEN
 
 PHOTO_FLOW_KEYWORDS = ["photo", "camera", "story", "stories", "capture", "image", "media"]
 
