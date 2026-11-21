@@ -194,16 +194,54 @@ fleet/
 
 ---
 
-## ✧ Quick Start
+## ✧ Quick Start & Automated Installation
 
-Requires **Python 3.8+**. Core features rely entirely on the Python standard library; multi-image slice stitching optionally utilizes `Pillow`.
+Requires **Python 3.8+**. Core operations use the standard library; multi-image stitching optionally utilizes `Pillow`.
 
 ```bash
 git clone https://github.com/SkrudjReal/refero-mcp-proxy.git
 cd refero-mcp-proxy
 ```
 
-### Client Integration Examples
+### ⚡ One-Click Automated Installer (Linux, macOS, Windows)
+
+Run the installer to automatically detect your environment, install optional dependencies, and configure **Codex**, **Antigravity**, **Claude Code**, and **OpenCode** in seconds:
+
+#### Linux / macOS
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+#### Windows (PowerShell)
+```powershell
+.\install.ps1
+```
+
+#### Installer Options & Flags
+Both `install.sh` and `install.ps1` support flexible arguments:
+* `--clients codex,antigravity,claude,opencode` — Configure specific clients (default: `all`).
+* `--unpack [path]` — Automatically unpack downloaded Google Drive archives.
+* `--data-dir /path/to/dataset` — Set custom `REFERO_DATA_DIR` across all client configs.
+* `--offline` — Enforce 100% offline air-gapped mode (`REFERO_OFFLINE=1`).
+* `--status` — Inspect current configuration status without modifying files.
+
+---
+
+### 📦 Unpacking Downloaded Google Drive Archives
+
+If you downloaded the dataset archives from [Google Drive](https://drive.google.com/drive/folders/1w9kEhGqLZ70K0Sui2W5IEQnTAaSxAWLT), extract them into the verified Content-Addressable Storage layout with a single command:
+
+```bash
+python unpack_dataset.py
+```
+*(By default, scans `Downloads/` or current directory for `refero_*.zip` and safely extracts into `outputs/refero-full-data/`).*
+
+---
+
+### Manual Client Configuration
+
+If you prefer configuring your clients manually:
 
 #### Codex (CLI / IDE)
 Add to `~/.codex/config.toml` (Linux/macOS) or `%USERPROFILE%\.codex\config.toml` (Windows):
@@ -236,6 +274,20 @@ Add to `~/.gemini/config/mcp_config.json` (Windows: `%USERPROFILE%\.gemini\confi
 #### Claude Code
 ```bash
 claude mcp add refero python /path/to/refero_mcp_server.py
+```
+
+#### OpenCode (`~/.config/opencode/opencode.json`)
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "refero": {
+      "type": "local",
+      "command": ["python", "/path/to/refero-mcp-proxy/refero_mcp_server.py"],
+      "enabled": true
+    }
+  }
+}
 ```
 
 #### Cursor (`~/.cursor/mcp.json`)

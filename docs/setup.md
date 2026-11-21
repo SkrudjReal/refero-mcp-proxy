@@ -87,6 +87,45 @@ Reload MCP servers after editing. See [Antigravity MCP documentation](https://an
 
 Use the same `mcpServers` JSON structure in `~/.gemini/settings.json` (Windows: `%USERPROFILE%\.gemini\settings.json`), not Antigravity's `mcp_config.json`. See [Gemini CLI MCP documentation](https://geminicli.com/docs/tools/mcp-server/).
 
+### OpenCode
+
+Add to `~/.config/opencode/opencode.json` (Windows: `%USERPROFILE%\.config\opencode\opencode.json`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "refero": {
+      "type": "local",
+      "command": ["python", "/absolute/path/to/refero-mcp-proxy/refero_mcp_server.py"],
+      "enabled": true
+    }
+  }
+}
+```
+
+---
+
+## Automated 1-Click Installation (`install.sh` / `install.ps1`)
+
+The repository includes cross-platform installers that automatically update configs for Codex, Antigravity, Claude Code, and OpenCode:
+
+```bash
+# Linux / macOS
+chmod +x install.sh
+./install.sh
+
+# Windows (PowerShell)
+.\install.ps1
+```
+
+Supported flags:
+- `--clients codex,antigravity,claude,opencode`: Target specific clients.
+- `--unpack [path]`: Extract downloaded Google Drive archives.
+- `--data-dir <path>`: Set custom dataset storage path.
+- `--offline`: Enforce 100% offline air-gapped mode.
+- `--status`: Check configuration status without altering files.
+
 ---
 
 ## Offline Dataset Mirror Download & Setup
