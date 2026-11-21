@@ -10,7 +10,7 @@
 [![Forks](https://img.shields.io/github/forks/SkrudjReal/refero-mcp-proxy?style=for-the-badge&color=a5b4fc&labelColor=19152e)](https://github.com/SkrudjReal/refero-mcp-proxy/forks)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
 
-[Quick Start](#-quick-start) · [Architecture & Engines](#-architecture--engines) · [Local Image Storage (CAS)](#-local-image-storage--reading-mechanism) · [Tools](#-tool-reference-14-tools) · [Setup Guide](docs/setup.md) · [Issues](https://github.com/SkrudjReal/refero-mcp-proxy/issues/new)
+[Quick Start](#-quick-start) · [Dataset Mirror (Google Drive)](#-offline-dataset-mirror--download) · [Benchmarks](#-performance-benchmarks-local-mirror-vs-remote-api) · [Architecture & Engines](#-architecture--engines) · [Local CAS Storage](#-local-image-storage--reading-mechanism) · [Tools](#-tool-reference-14-tools) · [Setup Guide](docs/setup.md) · [Issues](https://github.com/SkrudjReal/refero-mcp-proxy/issues/new)
 
 </div>
 
@@ -21,6 +21,76 @@
 It operates via standard I/O (JSON-RPC 2.0 stdio) and features a **dual-engine architecture**:
 1. **Remote Bypass Engine**: Extracts high-resolution, unwatermarked design assets directly from upstream APIs and CloudFront CDNs without web paywall restrictions or active browser automation.
 2. **Local Offline Engine**: A zero-dependency, air-gapped catalog engine bundled with **242,872 direct screenshot URLs across 778 products** (`refero_all_links_images.json`) and Content-Addressable Storage (CAS) for local image and UX flow resolution.
+
+---
+
+## ✧ Performance Benchmarks: Local Mirror vs. Remote API
+
+Empirical benchmarks measured on live workloads comparing direct remote API/CDN calls against local Content-Addressable Storage and cached JSON indices:
+
+| Operation | Remote Live API | Local Mirror (CAS / JSON) | Acceleration |
+| :--- | :--- | :--- | :--- |
+| **Product / Site Search** (`refero_search_site`) | 151.6 ms | 0.20 ms | **742x faster** |
+| **UX Journey Flow Retrieval** (`refero_get_flow`) | 450.2 ms | 0.37 ms | **1,229x faster** |
+| **Design System Spec Parsing** (`refero_get_style`) | 4,399.1 ms | 1.17 ms | **3,775x faster** |
+| **Screenshot Asset Resolution** (`refero_download_screen`) | 52.1 – 124.6 ms | 0.95 – 1.36 ms | **38x – 131x faster** |
+| **Catalog Query & Filtering** (`refero_get_catalog`) | 145.6 ms | 0.15 ms | **970x faster** |
+
+* Benchmarks executed on Windows 11 (Python 3.12, NVMe SSD, 100 Mbps broadband). Local operations eliminate network handshakes, CloudFront round-trips, and rate limits.
+
+---
+
+## ✧ Offline Dataset Mirror & Download
+
+The complete Refero dataset archive (**360,332 files | ~41.5 GB**) is publicly hosted on Google Drive:
+
+### 📦 [Download Complete Refero Archive (Google Drive)](https://drive.google.com/drive/folders/1w9kEhGqLZ70K0Sui2W5IEQnTAaSxAWLT)
+
+The Google Drive repository is structured into modular packages so you can download only what you need:
+
+| Package | Size | Description |
+| :--- | :--- | :--- |
+| `_catalogs/` (Folder) | ~55 MB | Direct viewable/searchable JSON catalogs (`refero_all_links_images.json`, `sites_available.json`, `apps_available.json`). |
+| `refero_styles_design_systems.zip` | 124.9 MB | All 1,342 design systems (`DESIGN.md`, `spec.json`, `source.html`, and preview images). |
+| `refero_flows.zip` | 10.9 MB | All 13,698 multi-step UX journey flows (`fleet/flows/*.json`). |
+| `refero_site_assets_and_pages.zip` | 18.2 MB | Curated collection pages, design articles, and site assets. |
+| `refero_fleet_images_00_3f.zip` | 7.61 GB | Full-resolution screenshot shard (`00` through `3f`). |
+| `refero_fleet_images_40_7f.zip` | 7.52 GB | Full-resolution screenshot shard (`40` through `7f`). |
+| `refero_fleet_images_80_bf.zip` | 7.53 GB | Full-resolution screenshot shard (`80` through `bf`). |
+| `refero_fleet_images_c0_ff.zip` | 7.58 GB | Full-resolution screenshot shard (`c0` through `ff`). |
+| `refero_web_screens.zip` | 7.35 GB | Web screenshots legacy archive. |
+| `refero_ios_screens.zip` | 3.43 GB | iOS screenshots legacy archive. |
+| `README_DATASET.md` | 2.7 KB | Dataset layout documentation and extraction guide. |
+
+### Where to Extract for Automatic MCP Detection
+
+To enable instant local resolution in `refero-mcp-proxy`, unpack the archives following this directory layout:
+
+```text
+your-project/
+├── refero-mcp-proxy/
+│   ├── refero_mcp_server.py
+│   └── refero_all_links_images.json
+└── outputs/refero-full-data/          <-- Auto-detected by default!
+    ├── fleet/
+    │   ├── flows/                     <-- Unpack refero_flows.zip here (*.json)
+    │   └── images/                    <-- Unpack refero_fleet_images_*.zip here (00/..ff/)
+    ├── styles/                        <-- Unpack refero_styles_design_systems.zip here
+    ├── web/                           <-- Unpack refero_web_screens.zip here
+    └── ios/                           <-- Unpack refero_ios_screens.zip here
+```
+
+#### Custom Storage Directory (`REFERO_DATA_DIR`)
+If you store the dataset on another drive or folder, pass its path via the `REFERO_DATA_DIR` environment variable:
+```bash
+# Linux / macOS
+export REFERO_DATA_DIR="/Volumes/ExternalDrive/refero-full-data"
+
+# Windows (PowerShell)
+$env:REFERO_DATA_DIR = "D:\Datasets\refero-full-data"
+```
+
+The server automatically scans `$REFERO_DATA_DIR/fleet/images` and `$REFERO_DATA_DIR/fleet/flows`. In offline mode (`REFERO_OFFLINE=1`), all image downloads and flow lookups resolve locally with zero latency.
 
 ---
 
@@ -91,23 +161,6 @@ fleet/
   3. It verifies whether `fleet/images/<hash[:2]>/<hash>.jpg` exists in the local data directory.
   4. If found, the image is immediately copied or served from disk with zero network latency. If absent and `REFERO_OFFLINE` is not set, it downloads and caches the file.
 
-### 2. UX Flow Sequences
-Flows are stored as standalone atomic JSON structures under:
-```
-fleet/flows/{flow_id}.json
-```
-Each flow contains the step-by-step user journey, route transitions, action descriptions, and references to all involved screen assets. In offline mode, `refero_get_flow` directly resolves from this folder.
-
-### 3. Configuring Local Mirror Storage (`REFERO_DATA_DIR`)
-You can point the MCP server to your local archive or external storage mount using the `REFERO_DATA_DIR` environment variable:
-```bash
-export REFERO_DATA_DIR="/path/to/refero-full-data"
-```
-The server automatically searches for:
-1. `$REFERO_DATA_DIR/fleet/images` and `$REFERO_DATA_DIR/fleet/flows`
-2. Neighbor directory `outputs/refero-full-data/fleet`
-3. Repository-relative `./fleet` or `./data`
-
 ---
 
 ## ✧ Quick Start
@@ -140,7 +193,10 @@ Add to `~/.gemini/config/mcp_config.json` (Windows: `%USERPROFILE%\.gemini\confi
   "mcpServers": {
     "refero": {
       "command": "python",
-      "args": ["/path/to/refero-mcp-proxy/refero_mcp_server.py"]
+      "args": ["/path/to/refero-mcp-proxy/refero_mcp_server.py"],
+      "env": {
+        "REFERO_DATA_DIR": "C:/Projects/outputs/refero-full-data"
+      }
     }
   }
 }

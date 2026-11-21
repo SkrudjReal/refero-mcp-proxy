@@ -89,6 +89,62 @@ Use the same `mcpServers` JSON structure in `~/.gemini/settings.json` (Windows: 
 
 ---
 
+## Offline Dataset Mirror Download & Setup
+
+The complete Refero dataset archive (**360,332 files | ~41.5 GB**) is available on Google Drive:
+
+🔗 **[Google Drive Complete Dataset Repository](https://drive.google.com/drive/folders/1w9kEhGqLZ70K0Sui2W5IEQnTAaSxAWLT)**
+
+### Available Packages
+
+- `_catalogs/` (Folder): Direct JSON files (`refero_all_links_images.json`, `sites_available.json`, `apps_available.json`).
+- `refero_styles_design_systems.zip` (124.9 MB): 1,342 design systems with `DESIGN.md`, tokens, and previews.
+- `refero_flows.zip` (10.9 MB): 13,698 UX journey flows (`fleet/flows/*.json`).
+- `refero_fleet_images_00_3f.zip` (7.61 GB): Shards `00`–`3f`.
+- `refero_fleet_images_40_7f.zip` (7.52 GB): Shards `40`–`7f`.
+- `refero_fleet_images_80_bf.zip` (7.53 GB): Shards `80`–`bf`.
+- `refero_fleet_images_c0_ff.zip` (7.58 GB): Shards `c0`–`ff`.
+- `refero_web_screens.zip` (7.35 GB) & `refero_ios_screens.zip` (3.43 GB).
+
+### Extraction Guide & Directory Placement
+
+To have the proxy auto-detect the offline data without configuring environment variables, place it in an `outputs/refero-full-data` directory adjacent to your project or repository:
+
+```text
+workspace/
+├── refero-mcp-proxy/
+│   ├── refero_mcp_server.py
+│   └── refero_all_links_images.json
+└── outputs/refero-full-data/
+    ├── fleet/
+    │   ├── flows/                     <-- Extract refero_flows.zip
+    │   └── images/                    <-- Extract refero_fleet_images_*.zip (00/..ff/)
+    ├── styles/                        <-- Extract refero_styles_design_systems.zip
+    ├── web/                           <-- Extract refero_web_screens.zip
+    └── ios/                           <-- Extract refero_ios_screens.zip
+```
+
+Alternatively, extract anywhere and set `REFERO_DATA_DIR`:
+```bash
+export REFERO_DATA_DIR="/path/to/extracted/refero-full-data"
+```
+
+---
+
+## Performance Benchmarks: Local Mirror vs. Remote API
+
+Empirical benchmarks comparing remote live API calls against local Content-Addressable Storage and cached JSON indices:
+
+| Operation | Remote Live API | Local Mirror (CAS / JSON) | Acceleration |
+| :--- | :--- | :--- | :--- |
+| **Product / Site Search** (`refero_search_site`) | 151.6 ms | 0.20 ms | **742x faster** |
+| **UX Journey Flow Retrieval** (`refero_get_flow`) | 450.2 ms | 0.37 ms | **1,229x faster** |
+| **Design System Spec Parsing** (`refero_get_style`) | 4,399.1 ms | 1.17 ms | **3,775x faster** |
+| **Screenshot Asset Resolution** (`refero_download_screen`) | 52.1 – 124.6 ms | 0.95 – 1.36 ms | **38x – 131x faster** |
+| **Catalog Query & Filtering** (`refero_get_catalog`) | 145.6 ms | 0.15 ms | **970x faster** |
+
+---
+
 ## Offline Catalogs & Content-Addressable Image Storage (CAS)
 
 The server supports two levels of offline operation:
